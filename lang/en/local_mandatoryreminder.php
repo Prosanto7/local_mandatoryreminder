@@ -168,6 +168,15 @@ $string['notification_small_level2'] = 'URGENT: Course due tomorrow';
 $string['notification_small_level3'] = 'OVERDUE: Course not completed';
 $string['notification_small_level4'] = 'CRITICAL: Course 2 weeks overdue';
 
+// Dashboard filters.
+$string['allstatuses'] = 'All Statuses';
+$string['allevels'] = 'All Levels';
+$string['alltypes'] = 'All Types';
+$string['timesent'] = 'Sent At';
+$string['filter'] = 'Apply Filter';
+$string['resetfilters'] = 'Reset';
+$string['total_enrolled_students'] = 'Total Enrolled Students';
+
 // Privacy.
 $string['privacy:metadata:local_mandatoryreminder_log'] = 'Log of sent reminders';
 $string['privacy:metadata:local_mandatoryreminder_log:userid'] = 'The ID of the user';

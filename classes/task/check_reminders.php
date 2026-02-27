@@ -53,50 +53,93 @@ class check_reminders extends \core\task\scheduled_task {
         $now = time();
         $mandatorycourses = local_mandatoryreminder_get_mandatory_courses();
 
-        mtrace('Found ' . count($mandatorycourses) . ' mandatory courses');
+        if (empty($mandatorycourses)) {
+            mtrace('No mandatory courses found. Ensure the "mandatory_status" custom course field is configured correctly.');
+            mtrace('Mandatory course reminder check completed');
+            return;
+        }
 
-        $totalqueued = 0;
+        $coursecount = count($mandatorycourses);
+        mtrace("Found {$coursecount} mandatory course(s)");
+
+        $totalqueued  = 0;
+        $totalskipped = 0;
+        $totalusers   = 0;
 
         foreach ($mandatorycourses as $courseid) {
-            $course = get_course($courseid);
-            $deadline = local_mandatoryreminder_get_course_deadline($courseid);
+            $course          = get_course($courseid);
+            $deadline        = local_mandatoryreminder_get_course_deadline($courseid);
             $deadlineseconds = $deadline * 24 * 60 * 60;
 
-            mtrace("Processing course: {$course->fullname} (ID: {$courseid}, Deadline: {$deadline} days)");
+            mtrace("Processing course: {$course->fullname} (ID: {$courseid}, deadline: {$deadline} days)");
 
             $incompleteusers = local_mandatoryreminder_get_incomplete_users($courseid);
-            
-            mtrace("  Found " . count($incompleteusers) . " incomplete users");
+            $usercount       = count($incompleteusers);
+            $totalusers     += $usercount;
+
+            if ($usercount === 0) {
+                mtrace('  No incomplete users found — skipping');
+                continue;
+            }
+
+            mtrace("  Found {$usercount} incomplete user(s)");
+
+            $coursequeued  = 0;
+            $courseskipped = 0;
 
             foreach ($incompleteusers as $user) {
-                $enroldate = $user->enroldate;
+                $enroldate    = $user->enroldate;
                 $deadlinedate = $enroldate + $deadlineseconds;
-                $daysdiff = ($now - $deadlinedate) / (24 * 60 * 60);
+                $daysdiff     = ($now - $deadlinedate) / (24 * 60 * 60);
 
                 // Determine which level(s) to send.
                 $levels = $this->determine_reminder_levels($daysdiff, $deadline);
 
+                if (empty($levels)) {
+                    mtrace('    User ' . $user->id . ' (' . fullname($user) . '): daysdiff=' .
+                        number_format($daysdiff, 1) . ' — not in any reminder window');
+                    continue;
+                }
+
+                mtrace('    User ' . $user->id . ' (' . fullname($user) . '): daysdiff=' .
+                    number_format($daysdiff, 1) . ', level(s): ' . implode(', ', $levels));
+
                 foreach ($levels as $level) {
                     // Check if already sent.
                     if (local_mandatoryreminder_is_sent($user->id, $courseid, $level)) {
+                        mtrace("      Level {$level}: already sent — skipping");
+                        $courseskipped++;
+                        $totalskipped++;
                         continue;
                     }
 
                     // Queue the reminders.
-                    $queued = $this->queue_reminders($user, $course, $level, $enroldate, $deadlinedate, $daysdiff);
-                    $totalqueued += $queued;
+                    $queued        = $this->queue_reminders($user, $course, $level, $enroldate, $deadlinedate, $daysdiff);
+                    $coursequeued += $queued;
+                    $totalqueued  += $queued;
 
-                    // Log as sent.
+                    mtrace("      Level {$level}: queued {$queued} email(s)");
+
+                    // Log as sent to prevent duplicate sends on subsequent cron runs.
                     local_mandatoryreminder_log_sent($user->id, $courseid, $level, $enroldate, $deadlinedate);
                 }
             }
+
+            mtrace("  Course done — queued: {$coursequeued}, skipped (already sent): {$courseskipped}");
         }
 
-        mtrace("Queued {$totalqueued} reminder emails");
+        mtrace('Run summary: courses=' . $coursecount . ', users=' . $totalusers .
+            ', emails queued=' . $totalqueued . ', levels skipped=' . $totalskipped);
 
-        // Queue ad-hoc task to process the queue.
-        $task = new \local_mandatoryreminder\task\process_queue();
-        \core\task\manager::queue_adhoc_task($task);
+        if ($totalqueued > 0) {
+            // Queue ad-hoc task to process the new emails.
+            mtrace('Queuing ad-hoc process_queue task...');
+            $task = new \local_mandatoryreminder\task\process_queue();
+            \core\task\manager::queue_adhoc_task($task);
+            mtrace('Ad-hoc process_queue task queued successfully');
+        } else {
+            mtrace('No new emails queued — ad-hoc task not needed');
+        }
 
         mtrace('Mandatory course reminder check completed');
     }
@@ -169,7 +212,7 @@ class check_reminders extends \core\task\scheduled_task {
         // Level 3 and 4: Also send to supervisor.
         if ($level >= 3) {
             $supervisoremail = local_mandatoryreminder_get_user_custom_field($user->id, 'SupervisorEmail');
-            
+
             if ($supervisoremail && validate_email($supervisoremail)) {
                 $queue = new \stdClass();
                 $queue->userid = $user->id;
@@ -181,16 +224,19 @@ class check_reminders extends \core\task\scheduled_task {
                 $queue->attempts = 0;
                 $queue->timecreated = $now;
                 $queue->timemodified = $now;
-                
+
                 $DB->insert_record('local_mandatoryreminder_queue', $queue);
                 $queued++;
+            } else {
+                mtrace('      [warn] User ' . $user->id . ': SupervisorEmail is missing or invalid' .
+                    " — supervisor not queued for level {$level}");
             }
         }
 
         // Level 4: Also send to SBU Head.
         if ($level == 4) {
             $sbuheademail = local_mandatoryreminder_get_user_custom_field($user->id, 'sbuheademail');
-            
+
             if ($sbuheademail && validate_email($sbuheademail)) {
                 $queue = new \stdClass();
                 $queue->userid = $user->id;
@@ -202,9 +248,12 @@ class check_reminders extends \core\task\scheduled_task {
                 $queue->attempts = 0;
                 $queue->timecreated = $now;
                 $queue->timemodified = $now;
-                
+
                 $DB->insert_record('local_mandatoryreminder_queue', $queue);
                 $queued++;
+            } else {
+                mtrace('      [warn] User ' . $user->id . ': sbuheademail is missing or invalid' .
+                    " — SBU head not queued for level {$level}");
             }
         }
 

@@ -273,17 +273,30 @@ function local_mandatoryreminder_get_mandatory_courses() {
 function local_mandatoryreminder_get_incomplete_users($courseid) {
     global $DB;
 
-    $sql = "SELECT DISTINCT u.id, u.email, u.firstname, u.lastname, ue.timecreated as enroldate
+    // Restrict to users who hold a student-archetype role in the course context.
+    // Teachers, managers, non-editing teachers, etc. are excluded because their
+    // {role}.archetype is not 'student'.
+    // MIN(ue.timecreated) + GROUP BY handles users with multiple active enrolments
+    // (e.g. manual + self-enrol) and always returns the earliest enrolment date.
+    $sql = "SELECT u.id, u.email, u.firstname, u.lastname,
+                   MIN(ue.timecreated) AS enroldate
               FROM {user} u
-              JOIN {user_enrolments} ue ON ue.userid = u.id
-              JOIN {enrol} e ON e.id = ue.enrolid
-             WHERE e.courseid = :courseid
-               AND u.deleted = 0
-               AND u.suspended = 0
-               AND e.status = 0
-               AND ue.status = 0";
+              JOIN {user_enrolments} ue  ON ue.userid    = u.id
+              JOIN {enrol}           e   ON e.id         = ue.enrolid
+              JOIN {context}         ctx ON ctx.instanceid = e.courseid
+                                        AND ctx.contextlevel = :ctxlevel
+              JOIN {role_assignments} ra  ON ra.userid    = u.id
+                                        AND ra.contextid = ctx.id
+              JOIN {role}             r   ON r.id         = ra.roleid
+                                        AND r.archetype  = 'student'
+             WHERE e.courseid   = :courseid
+               AND u.deleted    = 0
+               AND u.suspended  = 0
+               AND e.status     = 0
+               AND ue.status    = 0
+             GROUP BY u.id, u.email, u.firstname, u.lastname";
 
-    $users = $DB->get_records_sql($sql, ['courseid' => $courseid]);
+    $users = $DB->get_records_sql($sql, ['courseid' => $courseid, 'ctxlevel' => CONTEXT_COURSE]);
 
     if (empty($users)) {
         return [];

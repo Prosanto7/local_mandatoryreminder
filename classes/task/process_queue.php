@@ -41,24 +41,55 @@ class process_queue extends \core\task\adhoc_task {
 
         mtrace('Processing mandatory reminder email queue...');
 
-        $batchsize = get_config('local_mandatoryreminder', 'email_batch_size') ?: 50;
+        // Recover items stuck in 'processing' state from a previous failed run (> 30 min old).
+        $stuckthreshold = time() - (30 * 60);
+        $stuckcount = $DB->count_records_select(
+            'local_mandatoryreminder_queue',
+            "status = 'processing' AND timemodified < :threshold",
+            ['threshold' => $stuckthreshold]
+        );
+        if ($stuckcount > 0) {
+            mtrace("Recovering {$stuckcount} item(s) stuck in 'processing' state (stale for >30 min)...");
+            $DB->execute(
+                "UPDATE {local_mandatoryreminder_queue}
+                    SET status = 'pending', timemodified = :now
+                  WHERE status = 'processing' AND timemodified < :threshold",
+                ['now' => time(), 'threshold' => $stuckthreshold]
+            );
+        }
 
-        // Get pending emails.
-        $queueitems = $DB->get_records('local_mandatoryreminder_queue', 
-            ['status' => 'pending'], 
-            'timecreated ASC', 
-            '*', 
-            0, 
+        $batchsize = (int)(get_config('local_mandatoryreminder', 'email_batch_size') ?: 50);
+        mtrace("Batch size: {$batchsize}");
+
+        // Get pending emails ordered oldest-first.
+        $queueitems = $DB->get_records(
+            'local_mandatoryreminder_queue',
+            ['status' => 'pending'],
+            'timecreated ASC',
+            '*',
+            0,
             $batchsize
         );
 
-        mtrace('Processing ' . count($queueitems) . ' queued emails');
+        $itemcount = count($queueitems);
+        mtrace("Found {$itemcount} pending item(s) to process");
+
+        if ($itemcount === 0) {
+            mtrace('Queue is empty — nothing to do');
+            return;
+        }
+
+        $successcount = 0;
+        $failcount    = 0;
 
         foreach ($queueitems as $item) {
-            // Mark as processing.
+            // Mark as processing to prevent duplicate processing.
             $item->status = 'processing';
             $item->timemodified = time();
             $DB->update_record('local_mandatoryreminder_queue', $item);
+
+            mtrace("  Item ID {$item->id}: user={$item->userid}, course={$item->courseid}," .
+                " level={$item->level}, type={$item->recipient_type}, to={$item->recipient_email}");
 
             try {
                 $success = $this->send_reminder_email($item);
@@ -66,32 +97,71 @@ class process_queue extends \core\task\adhoc_task {
                 if ($success) {
                     $item->status = 'sent';
                     $item->timesent = time();
-                    
-                    // Also send notification.
-                    $this->send_notification($item);
+                    $successcount++;
+                    mtrace('    → Sent successfully');
+
+                    // For supervisor/sbuhead recipients, mark all sibling queue items
+                    // (same recipient address + course + level) as sent so that only ONE
+                    // grouped email is delivered per recipient, regardless of batch size.
+                    if ($item->recipient_type !== 'employee') {
+                        $now = time();
+                        $DB->execute(
+                            "UPDATE {local_mandatoryreminder_queue}
+                                SET status = 'sent', timesent = :timesent, timemodified = :timemod
+                              WHERE recipient_type  = :rtype
+                                AND recipient_email = :remail
+                                AND courseid        = :courseid
+                                AND level           = :level
+                                AND status         IN ('pending', 'processing')
+                                AND id             != :id",
+                            [
+                                'timesent' => $now,
+                                'timemod'  => $now,
+                                'rtype'    => $item->recipient_type,
+                                'remail'   => $item->recipient_email,
+                                'courseid' => $item->courseid,
+                                'level'    => $item->level,
+                                'id'       => $item->id,
+                            ]
+                        );
+                        mtrace('    → Marked sibling ' . $item->recipient_type . ' queue items as sent (dedup)');
+                    }
+
+                    // Send in-app notification (send_notification() restricts to employee only).
+                    $notified = $this->send_notification($item);
+                    if ($item->recipient_type === 'employee') {
+                        mtrace('    → In-app notification: ' . ($notified ? 'sent' : 'failed or skipped'));
+                    }
+
                 } else {
                     $item->status = 'failed';
                     $item->attempts++;
-                    $item->error_message = 'Failed to send email';
+                    $item->error_message = 'Email sending returned false';
+                    $failcount++;
+                    mtrace("    → Failed (attempt {$item->attempts})");
                 }
             } catch (\Exception $e) {
                 $item->status = 'failed';
                 $item->attempts++;
-                $item->error_message = $e->getMessage();
-                mtrace('Error sending email: ' . $e->getMessage());
+                $item->error_message = substr($e->getMessage(), 0, 255);
+                $failcount++;
+                mtrace('    → Exception: ' . $e->getMessage());
             }
 
             $item->timemodified = time();
             $DB->update_record('local_mandatoryreminder_queue', $item);
         }
 
-        // If there are more pending emails, queue another task.
+        mtrace("Batch complete — sent: {$successcount}, failed: {$failcount}");
+
+        // If there are more pending emails, chain another ad-hoc task.
         $remaining = $DB->count_records('local_mandatoryreminder_queue', ['status' => 'pending']);
-        
         if ($remaining > 0) {
-            mtrace("Still {$remaining} emails pending, queuing next batch...");
+            mtrace("Still {$remaining} pending email(s) — queuing next batch...");
             $task = new \local_mandatoryreminder\task\process_queue();
             \core\task\manager::queue_adhoc_task($task);
+        } else {
+            mtrace('All emails processed — queue is now empty');
         }
 
         mtrace('Email queue processing completed');
@@ -110,6 +180,7 @@ class process_queue extends \core\task\adhoc_task {
         $course = get_course($item->courseid);
 
         if (!$user || !$course) {
+            mtrace("    Skipping: user (ID {$item->userid}) or course (ID {$item->courseid}) not found");
             return false;
         }
 
@@ -129,6 +200,7 @@ class process_queue extends \core\task\adhoc_task {
 
         if (!$enrol) {
             // No enrolment record found; skip this item.
+            mtrace("    Skipping: no enrolment record for user={$item->userid} in course={$item->courseid}");
             return false;
         }
 
@@ -202,33 +274,27 @@ class process_queue extends \core\task\adhoc_task {
             $ccemails[] = $emp->email;
         }
 
-        // Create a temporary user object for supervisor email.
-        $supervisor = new \stdClass();
-        $supervisor->email = $item->recipient_email;
-        $supervisor->firstname = '';
-        $supervisor->lastname = '';
-        $supervisor->id = -1;
-        $supervisor->mailformat = 1;
-        $supervisor->deleted = 0;
-        $supervisor->suspended = 0;
-
+        // Build a recipient object for the supervisor.  Clone the noreply user so all
+        // fields required by email_to_user() are present, then override contact details.
         $noreplyuser = \core_user::get_noreply_user();
+        $supervisor  = clone $noreplyuser;
+        $supervisor->email      = $item->recipient_email;
+        $supervisor->firstname  = '';
+        $supervisor->lastname   = '';
+        $supervisor->mailformat = 1;
 
         // Send main email to supervisor.
         $success = email_to_user($supervisor, $noreplyuser, $subject, html_to_text($body), $body);
 
         // Send CC emails.
         foreach ($ccemails as $ccemail) {
-            $ccuser = new \stdClass();
-            $ccuser->email = $ccemail;
+            $ccuser            = clone $noreplyuser;
+            $ccuser->email     = $ccemail;
             $ccuser->firstname = '';
-            $ccuser->lastname = '';
-            $ccuser->id = -1;
+            $ccuser->lastname  = '';
             $ccuser->mailformat = 1;
-            $ccuser->deleted = 0;
-            $ccuser->suspended = 0;
-            
-            email_to_user($ccuser, $noreplyuser, "[CC] " . $subject, html_to_text($body), $body);
+
+            email_to_user($ccuser, $noreplyuser, '[CC] ' . $subject, html_to_text($body), $body);
         }
 
         return $success;
@@ -264,33 +330,27 @@ class process_queue extends \core\task\adhoc_task {
             }
         }
 
-        // Create a temporary user object for SBU head email.
-        $sbuhead = new \stdClass();
-        $sbuhead->email = $item->recipient_email;
-        $sbuhead->firstname = '';
-        $sbuhead->lastname = '';
-        $sbuhead->id = -1;
-        $sbuhead->mailformat = 1;
-        $sbuhead->deleted = 0;
-        $sbuhead->suspended = 0;
-
+        // Build a recipient object for the SBU head.  Clone the noreply user so all
+        // fields required by email_to_user() are present, then override contact details.
         $noreplyuser = \core_user::get_noreply_user();
+        $sbuhead     = clone $noreplyuser;
+        $sbuhead->email      = $item->recipient_email;
+        $sbuhead->firstname  = '';
+        $sbuhead->lastname   = '';
+        $sbuhead->mailformat = 1;
 
         // Send main email to SBU head.
         $success = email_to_user($sbuhead, $noreplyuser, $subject, html_to_text($body), $body);
 
         // Send CC emails to managers.
         foreach ($ccemails as $ccemail) {
-            $ccuser = new \stdClass();
-            $ccuser->email = $ccemail;
+            $ccuser            = clone $noreplyuser;
+            $ccuser->email     = $ccemail;
             $ccuser->firstname = '';
-            $ccuser->lastname = '';
-            $ccuser->id = -1;
+            $ccuser->lastname  = '';
             $ccuser->mailformat = 1;
-            $ccuser->deleted = 0;
-            $ccuser->suspended = 0;
-            
-            email_to_user($ccuser, $noreplyuser, "[CC] " . $subject, html_to_text($body), $body);
+
+            email_to_user($ccuser, $noreplyuser, '[CC] ' . $subject, html_to_text($body), $body);
         }
 
         return $success;
@@ -446,7 +506,7 @@ class process_queue extends \core\task\adhoc_task {
         $message->fullmessagehtml = '';
         $message->smallmessage = get_string('notification_small_level' . $item->level, 'local_mandatoryreminder');
         $message->notification = 1;
-        $message->contexturl = new \moodle_url('/course/view.php', ['id' => $course->id]);
+        $message->contexturl = (new \moodle_url('/course/view.php', ['id' => $course->id]))->out(false);
         $message->contexturlname = format_string($course->fullname);
 
         return message_send($message) !== false;
