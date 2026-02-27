@@ -124,4 +124,20 @@ if ($hassiteconfig) {
         new moodle_url('/local/mandatoryreminder/dashboard.php'),
         'local/mandatoryreminder:viewdashboard'
     ));
+
+    // Add Student Reminder List page.
+    $ADMIN->add('local_mandatoryreminder', new admin_externalpage(
+        'local_mandatoryreminder_studentlist',
+        get_string('student_list', 'local_mandatoryreminder'),
+        new moodle_url('/local/mandatoryreminder/student_list.php'),
+        'local/mandatoryreminder:sendemails'
+    ));
+
+    // Add Management Reminder List page.
+    $ADMIN->add('local_mandatoryreminder', new admin_externalpage(
+        'local_mandatoryreminder_managementlist',
+        get_string('management_list', 'local_mandatoryreminder'),
+        new moodle_url('/local/mandatoryreminder/management_list.php'),
+        'local/mandatoryreminder:sendemails'
+    ));
 }

@@ -1,0 +1,45 @@
+{{!
+  Email preview modal for mandatory reminder queue items.
+  Data:
+    modalid   (string) unique HTML id for this modal instance
+    subject   (string) email subject line
+    body      (string) rendered HTML email body (output as unescaped HTML)
+}}
+<div class="modal fade" id="{{modalid}}" tabindex="-1" role="dialog"
+     aria-labelledby="{{modalid}}-title" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable" role="document">
+    <div class="modal-content">
+
+      <div class="modal-header">
+        <h5 class="modal-title" id="{{modalid}}-title">
+          <i class="fa fa-envelope-o mr-2" aria-hidden="true"></i>
+          {{#str}} preview_email, local_mandatoryreminder {{/str}}
+        </h5>
+        <button type="button" class="close" data-dismiss="modal" aria-label="{{#str}} close {{/str}}">
+          <span aria-hidden="true">&times;</span>
+        </button>
+      </div>
+
+      <div class="modal-body p-0">
+        {{! Subject bar }}
+        <div class="px-4 py-3 border-bottom bg-light">
+          <small class="text-muted font-weight-bold text-uppercase">
+            {{#str}} subject, local_mandatoryreminder {{/str}}
+          </small>
+          <p class="mb-0 mt-1 font-weight-semibold preview-subject"></p>
+        </div>
+
+        {{! Body }}
+        <div class="px-4 py-4 preview-body">
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-dismiss="modal">
+          {{#str}} close {{/str}}
+        </button>
+      </div>
+
+    </div>
+  </div>
+</div>

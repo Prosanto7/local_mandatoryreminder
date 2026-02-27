@@ -27,6 +27,7 @@ namespace local_mandatoryreminder\task;
 defined('MOODLE_INTERNAL') || die();
 
 require_once($CFG->dirroot . '/local/mandatoryreminder/lib.php');
+require_once($CFG->dirroot . '/local/mandatoryreminder/classes/email_sender.php');
 
 /**
  * Check reminders task
@@ -132,13 +133,9 @@ class check_reminders extends \core\task\scheduled_task {
             ', emails queued=' . $totalqueued . ', levels skipped=' . $totalskipped);
 
         if ($totalqueued > 0) {
-            // Queue ad-hoc task to process the new emails.
-            mtrace('Queuing ad-hoc process_queue task...');
-            $task = new \local_mandatoryreminder\task\process_queue();
-            \core\task\manager::queue_adhoc_task($task);
-            mtrace('Ad-hoc process_queue task queued successfully');
+            mtrace("Emails queued for human review. Use the Student List or Management List pages to send them.");
         } else {
-            mtrace('No new emails queued — ad-hoc task not needed');
+            mtrace('No new emails queued.');
         }
 
         mtrace('Mandatory course reminder check completed');
@@ -205,7 +202,14 @@ class check_reminders extends \core\task\scheduled_task {
         $queue->attempts = 0;
         $queue->timecreated = $now;
         $queue->timemodified = $now;
-        
+
+        // Pre-render subject + body at queue time so preview and dispatch are instant.
+        $prerendered = \local_mandatoryreminder\email_sender::prerender_employee(
+            $user, $course, $level, $daysdiff
+        );
+        $queue->email_subject = $prerendered['subject'];
+        $queue->email_body    = $prerendered['body'];
+
         $DB->insert_record('local_mandatoryreminder_queue', $queue);
         $queued++;
 

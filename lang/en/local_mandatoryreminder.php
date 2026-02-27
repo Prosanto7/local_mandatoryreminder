@@ -188,3 +188,26 @@ $string['privacy:metadata:local_mandatoryreminder_queue'] = 'Queue of emails to 
 $string['privacy:metadata:local_mandatoryreminder_queue:userid'] = 'The ID of the user';
 $string['privacy:metadata:local_mandatoryreminder_queue:courseid'] = 'The ID of the course';
 $string['privacy:metadata:local_mandatoryreminder_queue:recipient_email'] = 'The email address of the recipient';
+
+// Human-intervention send pages.
+$string['student_list']       = 'Student Reminder List';
+$string['management_list']    = 'Management Reminder List';
+$string['preview_email']      = 'Preview';
+$string['send']               = 'Send';
+$string['send_selected']      = 'Send Selected';
+$string['send_all_pending']   = 'Send All Pending ({$a})';
+$string['confirm_send_all']   = 'This will queue all {$a} pending student reminders for sending. Continue?';
+$string['send_result']        = 'Sent: {$a->sent}, Failed: {$a->failed}';
+$string['send_queued']        = '{$a} email(s) queued for background sending.';
+$string['send_all_queued']    = '{$a} pending email(s) queued for background sending.';
+$string['no_pending_items']   = 'No pending items to send.';
+$string['showing_results']    = 'Showing {$a} result(s)';
+$string['actions']            = 'Actions';
+$string['subject']            = 'Subject';
+$string['select_all']         = 'Select all';
+$string['recipient']          = 'Recipient';
+$string['employees']          = 'Employees';
+$string['never']              = 'Never';
+
+// Capability strings.
+$string['mandatoryreminder:sendemails'] = 'Send mandatory reminder emails';

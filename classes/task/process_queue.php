@@ -15,7 +15,13 @@
 // along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
 /**
- * Ad-hoc task to process email queue
+ * Ad-hoc task to process email queue (batch or targeted send).
+ *
+ * Custom data keys (all optional):
+ *   item_ids       (array of int) - process only these specific queue IDs
+ *   recipient_type (string)       - process all pending items of this type
+ *                                   (e.g. 'employee' for "Send All Students")
+ * When neither is set the task processes a regular pending-item batch.
  *
  * @package    local_mandatoryreminder
  * @copyright  2026 Your Name
@@ -27,21 +33,21 @@ namespace local_mandatoryreminder\task;
 defined('MOODLE_INTERNAL') || die();
 
 require_once($CFG->dirroot . '/local/mandatoryreminder/lib.php');
+require_once($CFG->dirroot . '/local/mandatoryreminder/classes/email_sender.php');
+
+use local_mandatoryreminder\email_sender;
 
 /**
- * Process queue task
+ * Process queue ad-hoc task.
  */
 class process_queue extends \core\task\adhoc_task {
 
-    /**
-     * Execute task
-     */
     public function execute() {
         global $DB;
 
         mtrace('Processing mandatory reminder email queue...');
 
-        // Recover items stuck in 'processing' state from a previous failed run (> 30 min old).
+        // Recover stuck items.
         $stuckthreshold = time() - (30 * 60);
         $stuckcount = $DB->count_records_select(
             'local_mandatoryreminder_queue',
@@ -49,7 +55,7 @@ class process_queue extends \core\task\adhoc_task {
             ['threshold' => $stuckthreshold]
         );
         if ($stuckcount > 0) {
-            mtrace("Recovering {$stuckcount} item(s) stuck in 'processing' state (stale for >30 min)...");
+            mtrace("Recovering {$stuckcount} stuck item(s) (stale >30 min)...");
             $DB->execute(
                 "UPDATE {local_mandatoryreminder_queue}
                     SET status = 'pending', timemodified = :now
@@ -58,23 +64,46 @@ class process_queue extends \core\task\adhoc_task {
             );
         }
 
-        $batchsize = (int)(get_config('local_mandatoryreminder', 'email_batch_size') ?: 50);
-        mtrace("Batch size: {$batchsize}");
+        // Determine which items to process (targeted vs. batch).
+        $customdata = $this->get_custom_data();
 
-        // Get pending emails ordered oldest-first.
-        $queueitems = $DB->get_records(
-            'local_mandatoryreminder_queue',
-            ['status' => 'pending'],
-            'timecreated ASC',
-            '*',
-            0,
-            $batchsize
-        );
+        if ($customdata && !empty($customdata->item_ids)) {
+            [$insql, $inparams] = $DB->get_in_or_equal(
+                array_map('intval', $customdata->item_ids),
+                SQL_PARAMS_NAMED
+            );
+            $queueitems = $DB->get_records_select(
+                'local_mandatoryreminder_queue',
+                "status = 'pending' AND id {$insql}",
+                $inparams,
+                'timecreated ASC'
+            );
+            $targeted = true;
+            mtrace('Targeted run: ' . count($queueitems) . ' specific item(s)');
 
-        $itemcount = count($queueitems);
-        mtrace("Found {$itemcount} pending item(s) to process");
+        } else if ($customdata && !empty($customdata->recipient_type)) {
+            $rtype     = clean_param($customdata->recipient_type, PARAM_ALPHA);
+            $batchsize = (int)(get_config('local_mandatoryreminder', 'email_batch_size') ?: 50);
+            $queueitems = $DB->get_records(
+                'local_mandatoryreminder_queue',
+                ['status' => 'pending', 'recipient_type' => $rtype],
+                'timecreated ASC', '*', 0, $batchsize
+            );
+            $targeted = false;
+            mtrace("Type-filtered run: type={$rtype}, found=" . count($queueitems));
 
-        if ($itemcount === 0) {
+        } else {
+            $batchsize  = (int)(get_config('local_mandatoryreminder', 'email_batch_size') ?: 50);
+            $queueitems = $DB->get_records(
+                'local_mandatoryreminder_queue',
+                ['status' => 'pending'],
+                'timecreated ASC', '*', 0, $batchsize
+            );
+            $targeted = false;
+            mtrace("Batch run: size={$batchsize}, found=" . count($queueitems));
+        }
+
+        if (count($queueitems) === 0) {
             mtrace('Queue is empty — nothing to do');
             return;
         }
@@ -83,8 +112,14 @@ class process_queue extends \core\task\adhoc_task {
         $failcount    = 0;
 
         foreach ($queueitems as $item) {
-            // Mark as processing to prevent duplicate processing.
-            $item->status = 'processing';
+            // Re-read: sibling dedup may have already marked this row sent.
+            $freshstatus = $DB->get_field('local_mandatoryreminder_queue', 'status', ['id' => $item->id]);
+            if ($freshstatus !== 'pending') {
+                mtrace("  Item ID {$item->id}: now '{$freshstatus}' — skipping");
+                continue;
+            }
+
+            $item->status       = 'processing';
             $item->timemodified = time();
             $DB->update_record('local_mandatoryreminder_queue', $item);
 
@@ -92,60 +127,45 @@ class process_queue extends \core\task\adhoc_task {
                 " level={$item->level}, type={$item->recipient_type}, to={$item->recipient_email}");
 
             try {
-                $success = $this->send_reminder_email($item);
+                $success = email_sender::send_item($item);
 
                 if ($success) {
-                    $item->status = 'sent';
+                    $item->status   = 'sent';
                     $item->timesent = time();
                     $successcount++;
-                    mtrace('    → Sent successfully');
+                    mtrace('    -> Sent successfully');
 
-                    // For supervisor/sbuhead recipients, mark all sibling queue items
-                    // (same recipient address + course + level) as sent so that only ONE
-                    // grouped email is delivered per recipient, regardless of batch size.
-                    if ($item->recipient_type !== 'employee') {
-                        $now = time();
-                        $DB->execute(
-                            "UPDATE {local_mandatoryreminder_queue}
-                                SET status = 'sent', timesent = :timesent, timemodified = :timemod
-                              WHERE recipient_type  = :rtype
-                                AND recipient_email = :remail
-                                AND courseid        = :courseid
-                                AND level           = :level
-                                AND status         IN ('pending', 'processing')
-                                AND id             != :id",
-                            [
-                                'timesent' => $now,
-                                'timemod'  => $now,
-                                'rtype'    => $item->recipient_type,
-                                'remail'   => $item->recipient_email,
-                                'courseid' => $item->courseid,
-                                'level'    => $item->level,
-                                'id'       => $item->id,
-                            ]
-                        );
-                        mtrace('    → Marked sibling ' . $item->recipient_type . ' queue items as sent (dedup)');
+                    email_sender::mark_siblings_sent($item);
+
+                    $notified = email_sender::send_notification($item);
+                    if ($item->recipient_type === 'employee') {
+                        mtrace('    -> Notification: ' . ($notified ? 'sent' : 'skipped'));
                     }
 
-                    // Send in-app notification (send_notification() restricts to employee only).
-                    $notified = $this->send_notification($item);
-                    if ($item->recipient_type === 'employee') {
-                        mtrace('    → In-app notification: ' . ($notified ? 'sent' : 'failed or skipped'));
+                    $enrol = email_sender::get_enrolment($item->userid, $item->courseid);
+                    if ($enrol) {
+                        $deadline     = local_mandatoryreminder_get_course_deadline($item->courseid);
+                        $deadlinedate = $enrol->timecreated + ($deadline * 86400);
+                        local_mandatoryreminder_log_sent(
+                            $item->userid, $item->courseid, $item->level,
+                            $enrol->timecreated, $deadlinedate
+                        );
                     }
 
                 } else {
-                    $item->status = 'failed';
+                    $item->status        = 'failed';
                     $item->attempts++;
-                    $item->error_message = 'Email sending returned false';
+                    $item->error_message = 'email_to_user() returned false';
                     $failcount++;
-                    mtrace("    → Failed (attempt {$item->attempts})");
+                    mtrace("    -> Failed (attempt {$item->attempts})");
                 }
+
             } catch (\Exception $e) {
-                $item->status = 'failed';
+                $item->status        = 'failed';
                 $item->attempts++;
                 $item->error_message = substr($e->getMessage(), 0, 255);
                 $failcount++;
-                mtrace('    → Exception: ' . $e->getMessage());
+                mtrace('    -> Exception: ' . $e->getMessage());
             }
 
             $item->timemodified = time();
@@ -154,398 +174,21 @@ class process_queue extends \core\task\adhoc_task {
 
         mtrace("Batch complete — sent: {$successcount}, failed: {$failcount}");
 
-        // If there are more pending emails, chain another ad-hoc task.
-        $remaining = $DB->count_records('local_mandatoryreminder_queue', ['status' => 'pending']);
-        if ($remaining > 0) {
-            mtrace("Still {$remaining} pending email(s) — queuing next batch...");
-            $task = new \local_mandatoryreminder\task\process_queue();
-            \core\task\manager::queue_adhoc_task($task);
-        } else {
-            mtrace('All emails processed — queue is now empty');
+        // Chain next batch for untargeted runs only.
+        if (!$targeted) {
+            $remaining = $DB->count_records('local_mandatoryreminder_queue', ['status' => 'pending']);
+            if ($remaining > 0) {
+                mtrace("Still {$remaining} pending — chaining next batch...");
+                $nexttask = new \local_mandatoryreminder\task\process_queue();
+                if ($customdata && !empty($customdata->recipient_type)) {
+                    $nexttask->set_custom_data(['recipient_type' => $customdata->recipient_type]);
+                }
+                \core\task\manager::queue_adhoc_task($nexttask);
+            } else {
+                mtrace('All emails processed — queue is now empty');
+            }
         }
 
         mtrace('Email queue processing completed');
-    }
-
-    /**
-     * Send reminder email
-     *
-     * @param stdClass $item Queue item
-     * @return bool Success
-     */
-    private function send_reminder_email($item) {
-        global $DB;
-
-        $user = $DB->get_record('user', ['id' => $item->userid]);
-        $course = get_course($item->courseid);
-
-        if (!$user || !$course) {
-            mtrace("    Skipping: user (ID {$item->userid}) or course (ID {$item->courseid}) not found");
-            return false;
-        }
-
-        // Get enrolment date for calculating days overdue.
-        // Use $limitnum=1 instead of a raw LIMIT clause for cross-database compatibility.
-        $enrolrecords = $DB->get_records_sql(
-            "SELECT ue.timecreated
-               FROM {user_enrolments} ue
-               JOIN {enrol} e ON e.id = ue.enrolid
-              WHERE ue.userid = :userid AND e.courseid = :courseid
-              ORDER BY ue.timecreated ASC",
-            ['userid' => $user->id, 'courseid' => $course->id],
-            0,
-            1
-        );
-        $enrol = $enrolrecords ? reset($enrolrecords) : null;
-
-        if (!$enrol) {
-            // No enrolment record found; skip this item.
-            mtrace("    Skipping: no enrolment record for user={$item->userid} in course={$item->courseid}");
-            return false;
-        }
-
-        $deadline = local_mandatoryreminder_get_course_deadline($course->id);
-        $deadlinedate = $enrol->timecreated + ($deadline * 24 * 60 * 60);
-        $daysoverdue = (time() - $deadlinedate) / (24 * 60 * 60);
-
-        // Get appropriate template.
-        $template = $this->get_email_template($item->level, $item->recipient_type);
-        
-        // Process template.
-        $body = local_mandatoryreminder_process_template($template, $user, $course, $daysoverdue);
-
-        // Get subject.
-        $subject = $this->get_email_subject($item->level, $course);
-
-        // Prepare email based on recipient type.
-        $success = false;
-        if ($item->recipient_type == 'employee') {
-            $success = $this->send_email_to_user($user, $subject, $body);
-        } else if ($item->recipient_type == 'supervisor') {
-            $success = $this->send_email_to_supervisor($item, $user, $course, $subject, $body);
-        } else if ($item->recipient_type == 'sbuhead') {
-            $success = $this->send_email_to_sbuhead($item, $user, $course, $subject, $body);
-        }
-
-        return $success;
-    }
-
-    /**
-     * Send email to user
-     *
-     * @param stdClass $user User object
-     * @param string $subject Email subject
-     * @param string $body Email body
-     * @return bool Success
-     */
-    private function send_email_to_user($user, $subject, $body) {
-        global $CFG;
-
-        $noreplyuser = \core_user::get_noreply_user();
-        
-        return email_to_user($user, $noreplyuser, $subject, html_to_text($body), $body);
-    }
-
-    /**
-     * Send email to supervisor (with grouped employees)
-     *
-     * @param stdClass $item Queue item
-     * @param stdClass $user User object
-     * @param stdClass $course Course object
-     * @param string $subject Email subject
-     * @param string $body Email body
-     * @return bool Success
-     */
-    private function send_email_to_supervisor($item, $user, $course, $subject, $body) {
-        global $DB, $CFG;
-
-        // Get all employees under this supervisor for this course.
-        $employees = $this->get_employees_by_supervisor($item->recipient_email, $course->id, $item->level);
-
-        // Build employee table.
-        $employeetable = $this->build_employee_table($employees, $course);
-        
-        // Replace placeholder in body.
-        $body = str_replace('{employee_table}', $employeetable, $body);
-
-        // Prepare CC list.
-        $ccemails = [];
-        foreach ($employees as $emp) {
-            $ccemails[] = $emp->email;
-        }
-
-        // Build a recipient object for the supervisor.  Clone the noreply user so all
-        // fields required by email_to_user() are present, then override contact details.
-        $noreplyuser = \core_user::get_noreply_user();
-        $supervisor  = clone $noreplyuser;
-        $supervisor->email      = $item->recipient_email;
-        $supervisor->firstname  = '';
-        $supervisor->lastname   = '';
-        $supervisor->mailformat = 1;
-
-        // Send main email to supervisor.
-        $success = email_to_user($supervisor, $noreplyuser, $subject, html_to_text($body), $body);
-
-        // Send CC emails.
-        foreach ($ccemails as $ccemail) {
-            $ccuser            = clone $noreplyuser;
-            $ccuser->email     = $ccemail;
-            $ccuser->firstname = '';
-            $ccuser->lastname  = '';
-            $ccuser->mailformat = 1;
-
-            email_to_user($ccuser, $noreplyuser, '[CC] ' . $subject, html_to_text($body), $body);
-        }
-
-        return $success;
-    }
-
-    /**
-     * Send email to SBU head (with grouped managers and employees)
-     *
-     * @param stdClass $item Queue item
-     * @param stdClass $user User object
-     * @param stdClass $course Course object
-     * @param string $subject Email subject
-     * @param string $body Email body
-     * @return bool Success
-     */
-    private function send_email_to_sbuhead($item, $user, $course, $subject, $body) {
-        global $DB, $CFG;
-
-        // Get all managers and their employees under this SBU head for this course.
-        $managersdata = $this->get_managers_by_sbuhead($item->recipient_email, $course->id, $item->level);
-
-        // Build manager-employee table.
-        $managertable = $this->build_manager_table($managersdata, $course);
-        
-        // Replace placeholder in body.
-        $body = str_replace('{manager_table}', $managertable, $body);
-
-        // Prepare CC list (only managers).
-        $ccemails = [];
-        foreach ($managersdata as $manager) {
-            if (!in_array($manager['supervisor_email'], $ccemails)) {
-                $ccemails[] = $manager['supervisor_email'];
-            }
-        }
-
-        // Build a recipient object for the SBU head.  Clone the noreply user so all
-        // fields required by email_to_user() are present, then override contact details.
-        $noreplyuser = \core_user::get_noreply_user();
-        $sbuhead     = clone $noreplyuser;
-        $sbuhead->email      = $item->recipient_email;
-        $sbuhead->firstname  = '';
-        $sbuhead->lastname   = '';
-        $sbuhead->mailformat = 1;
-
-        // Send main email to SBU head.
-        $success = email_to_user($sbuhead, $noreplyuser, $subject, html_to_text($body), $body);
-
-        // Send CC emails to managers.
-        foreach ($ccemails as $ccemail) {
-            $ccuser            = clone $noreplyuser;
-            $ccuser->email     = $ccemail;
-            $ccuser->firstname = '';
-            $ccuser->lastname  = '';
-            $ccuser->mailformat = 1;
-
-            email_to_user($ccuser, $noreplyuser, '[CC] ' . $subject, html_to_text($body), $body);
-        }
-
-        return $success;
-    }
-
-    /**
-     * Get employees by supervisor
-     *
-     * @param string $supervisoremail Supervisor email
-     * @param int $courseid Course ID
-     * @param int $level Reminder level
-     * @return array Array of user objects
-     */
-    private function get_employees_by_supervisor($supervisoremail, $courseid, $level) {
-        global $DB;
-
-        $sql = "SELECT DISTINCT u.id, u.email, u.firstname, u.lastname, q.userid, q.courseid
-                  FROM {local_mandatoryreminder_queue} q
-                  JOIN {user} u ON u.id = q.userid
-                 WHERE q.courseid = :courseid
-                   AND q.level = :level
-                   AND q.recipient_type = 'supervisor'
-                   AND q.recipient_email = :supervisoremail
-                   AND q.status IN ('pending', 'processing')";
-
-        return $DB->get_records_sql($sql, [
-            'courseid' => $courseid,
-            'level' => $level,
-            'supervisoremail' => $supervisoremail
-        ]);
-    }
-
-    /**
-     * Get managers and their employees by SBU head
-     *
-     * @param string $sbuheademail SBU head email
-     * @param int $courseid Course ID
-     * @param int $level Reminder level
-     * @return array Array of manager data
-     */
-    private function get_managers_by_sbuhead($sbuheademail, $courseid, $level) {
-        global $DB;
-
-        $sql = "SELECT DISTINCT u.id, u.email, u.firstname, u.lastname, q.userid, q.courseid,
-                       (SELECT d.data
-                          FROM {user_info_data} d
-                          JOIN {user_info_field} f ON d.fieldid = f.id
-                         WHERE d.userid = u.id AND f.shortname = 'SupervisorEmail') as supervisor_email
-                  FROM {local_mandatoryreminder_queue} q
-                  JOIN {user} u ON u.id = q.userid
-                 WHERE q.courseid = :courseid
-                   AND q.level = :level
-                   AND q.recipient_type = 'sbuhead'
-                   AND q.recipient_email = :sbuheademail
-                   AND q.status IN ('pending', 'processing')";
-
-        $employees = $DB->get_records_sql($sql, [
-            'courseid' => $courseid,
-            'level' => $level,
-            'sbuheademail' => $sbuheademail
-        ]);
-
-        // Group by supervisor.
-        $managers = [];
-        foreach ($employees as $emp) {
-            if (!isset($managers[$emp->supervisor_email])) {
-                $managers[$emp->supervisor_email] = [
-                    'supervisor_email' => $emp->supervisor_email,
-                    'employees' => []
-                ];
-            }
-            $managers[$emp->supervisor_email]['employees'][] = $emp;
-        }
-
-        return $managers;
-    }
-
-    /**
-     * Build employee table HTML
-     *
-     * @param array $employees Array of user objects
-     * @param stdClass $course Course object
-     * @return string HTML table
-     */
-    private function build_employee_table($employees, $course) {
-        $html = '<h3>' . format_string($course->fullname) . '</h3>';
-        $html .= '<ul>';
-        
-        foreach ($employees as $emp) {
-            $html .= '<li>' . fullname($emp) . ' (' . $emp->email . ')</li>';
-        }
-        
-        $html .= '</ul>';
-        
-        return $html;
-    }
-
-    /**
-     * Build manager-employee table HTML
-     *
-     * @param array $managers Array of manager data
-     * @param stdClass $course Course object
-     * @return string HTML table
-     */
-    private function build_manager_table($managers, $course) {
-        $html = '<h3>' . format_string($course->fullname) . '</h3>';
-        
-        foreach ($managers as $manager) {
-            $html .= '<h4>Manager: ' . $manager['supervisor_email'] . '</h4>';
-            $html .= '<ul>';
-            
-            foreach ($manager['employees'] as $emp) {
-                $html .= '<li>' . fullname($emp) . ' (' . $emp->email . ')</li>';
-            }
-            
-            $html .= '</ul>';
-        }
-        
-        return $html;
-    }
-
-    /**
-     * Send notification
-     *
-     * @param stdClass $item Queue item
-     * @return bool Success
-     */
-    private function send_notification($item) {
-        global $DB;
-
-        // Only send notifications to employees.
-        if ($item->recipient_type != 'employee') {
-            return true;
-        }
-
-        $user = $DB->get_record('user', ['id' => $item->userid]);
-        $course = get_course($item->courseid);
-
-        if (!$user || !$course) {
-            return false;
-        }
-
-        $message = new \core\message\message();
-        $message->component = 'local_mandatoryreminder';
-        $message->name = 'coursereminder';
-        $message->userfrom = \core_user::get_noreply_user();
-        $message->userto = $user;
-        $message->subject = get_string('notification_subject_level' . $item->level, 'local_mandatoryreminder', 
-            format_string($course->fullname));
-        $message->fullmessage = get_string('notification_message_level' . $item->level, 'local_mandatoryreminder', 
-            format_string($course->fullname));
-        $message->fullmessageformat = FORMAT_PLAIN;
-        $message->fullmessagehtml = '';
-        $message->smallmessage = get_string('notification_small_level' . $item->level, 'local_mandatoryreminder');
-        $message->notification = 1;
-        $message->contexturl = (new \moodle_url('/course/view.php', ['id' => $course->id]))->out(false);
-        $message->contexturlname = format_string($course->fullname);
-
-        return message_send($message) !== false;
-    }
-
-    /**
-     * Get email template
-     *
-     * @param int $level Reminder level
-     * @param string $recipienttype Recipient type
-     * @return string Template
-     */
-    private function get_email_template($level, $recipienttype) {
-        // Levels 1 and 2 only send to employees and their settings keys carry no
-        // recipient-type suffix (e.g. 'level1_template', not 'level1_employee_template').
-        if ($level <= 2) {
-            $key = 'level' . $level . '_template';
-        } else {
-            $key = 'level' . $level . '_' . $recipienttype . '_template';
-        }
-
-        $template = get_config('local_mandatoryreminder', $key);
-
-        if (empty($template)) {
-            $template = get_string($key . '_default', 'local_mandatoryreminder');
-        }
-
-        return $template;
-    }
-
-    /**
-     * Get email subject
-     *
-     * @param int $level Reminder level
-     * @param stdClass $course Course object
-     * @return string Subject
-     */
-    private function get_email_subject($level, $course) {
-        return get_string('email_subject_level' . $level, 'local_mandatoryreminder', 
-            format_string($course->fullname));
     }
 }

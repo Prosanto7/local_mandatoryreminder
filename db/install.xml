@@ -56,6 +56,8 @@
         <FIELD NAME="timecreated" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="false"/>
         <FIELD NAME="timemodified" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="false"/>
         <FIELD NAME="timesent" TYPE="int" LENGTH="10" NOTNULL="false" SEQUENCE="false"/>
+        <FIELD NAME="email_subject" TYPE="char" LENGTH="255" NOTNULL="false" SEQUENCE="false" COMMENT="Pre-rendered email subject stored at queue time"/>
+        <FIELD NAME="email_body" TYPE="text" NOTNULL="false" SEQUENCE="false" COMMENT="Pre-rendered email body stored at queue time"/>
       </FIELDS>
       <KEYS>
         <KEY NAME="primary" TYPE="primary" FIELDS="id"/>
