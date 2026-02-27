@@ -57,6 +57,7 @@ $string['recipient_type'] = 'Recipient Type';
 $string['status'] = 'Status';
 $string['attempts'] = 'Attempts';
 $string['created'] = 'Created';
+$string['picture'] = 'Picture';
 
 // Recipient types.
 $string['recipient_employee'] = 'Employee';

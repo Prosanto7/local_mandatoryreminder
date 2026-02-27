@@ -344,7 +344,7 @@ function local_mandatoryreminder_process_template($template, $user, $course, $da
         '{coursename}' => format_string($course->fullname),
         '{courseurl}' => $courseurl->out(false),
         '{courselink}' => html_writer::link($courseurl, format_string($course->fullname)),
-        '{daysoverdue}' => abs($daysoverdue),
+        '{daysoverdue}' => round(abs($daysoverdue)),
         '{sitename}' => format_string($CFG->fullname),
     ];
 

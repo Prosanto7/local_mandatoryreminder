@@ -68,10 +68,11 @@ $PAGE->set_pagelayout('admin');
 $table = new flexible_table('local_mandatoryreminder_queue');
 
 $table->define_columns([
-    'fullname', 'coursefullname', 'level', 'recipient_type',
+    'picture', 'fullname', 'coursefullname', 'level', 'recipient_type',
     'recipient_email', 'status', 'attempts', 'timecreated', 'timesent',
 ]);
 $table->define_headers([
+    get_string('picture', 'local_mandatoryreminder'),
     get_string('fullname'),
     get_string('course'),
     get_string('level',          'local_mandatoryreminder'),
@@ -232,7 +233,8 @@ $basefrom = "FROM {local_mandatoryreminder_queue} q
 $countsql  = "SELECT COUNT(q.id) {$basefrom}";
 $selectsql = "SELECT q.id, q.userid, q.courseid, q.level, q.recipient_type, q.recipient_email,
                      q.status, q.attempts, q.timecreated, q.timesent, q.error_message,
-                     u.firstname, u.lastname,
+                     u.firstname, u.lastname, u.picture, u.imagealt,
+                     u.firstnamephonetic, u.lastnamephonetic, u.middlename, u.alternatename,
                      c.fullname AS coursefullname
               {$basefrom}
               ORDER BY {$ordersql}";
@@ -416,7 +418,7 @@ $statusclasses = [
     'processing' => 'badge badge-warning',
     'pending'    => 'badge badge-secondary',
 ];
-$datetimefmt = get_string('strftimedatetime', 'langconfig');
+$datetimefmt = '%d-%m-%Y, %I:%M %p';
 
 foreach ($queueitems as $item) {
     if ($table->is_downloading()) {
@@ -428,8 +430,22 @@ foreach ($queueitems as $item) {
         $timesent    = $item->timesent ? userdate($item->timesent, $datetimefmt) : '';
     } else {
         // Rich HTML for browser view.
-        $profileurl  = new moodle_url('/user/profile.php', ['id' => $item->userid]);
-        $fullname    = html_writer::link($profileurl, fullname($item));
+        $profileurl = new moodle_url('/user/profile.php', ['id' => $item->userid]);
+
+        // Build a lightweight user object with the fields user_picture() requires.
+        $userobj = (object)[
+            'id'                => $item->userid,
+            'picture'           => $item->picture,
+            'imagealt'          => $item->imagealt,
+            'firstname'         => $item->firstname,
+            'lastname'          => $item->lastname,
+            'firstnamephonetic' => $item->firstnamephonetic,
+            'lastnamephonetic'  => $item->lastnamephonetic,
+            'middlename'        => $item->middlename,
+            'alternatename'     => $item->alternatename,
+        ];
+        $userpic  = $OUTPUT->user_picture($userobj, ['size' => 35, 'link' => false, 'class' => 'rounded-circle mr-2']);
+        $fullname = html_writer::link($profileurl, fullname($item));
 
         $courseurl   = new moodle_url('/course/view.php', ['id' => $item->courseid]);
         $coursename  = html_writer::link($courseurl, format_string($item->coursefullname));
@@ -454,6 +470,7 @@ foreach ($queueitems as $item) {
     }
 
     $table->add_data([
+        $userpic,
         $fullname,
         $coursename,
         $item->level,
