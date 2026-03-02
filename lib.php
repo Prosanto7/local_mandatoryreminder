@@ -216,6 +216,22 @@ function local_mandatoryreminder_is_sent($userid, $courseid, $level) {
 function local_mandatoryreminder_log_sent($userid, $courseid, $level, $enroldate, $deadline) {
     global $DB;
 
+    // Check if this exact combination already exists due to the unique index.
+    $existing = $DB->get_record('local_mandatoryreminder_log', [
+        'userid' => $userid,
+        'courseid' => $courseid,
+        'level' => $level
+    ]);
+
+    if ($existing) {
+        // Update the existing log entry instead of inserting a duplicate.
+        $existing->enrolment_date = $enroldate;
+        $existing->deadline_date = $deadline;
+        $existing->sent_date = time();
+        return $DB->update_record('local_mandatoryreminder_log', $existing);
+    }
+
+    // Insert new log entry.
     $log = new stdClass();
     $log->userid = $userid;
     $log->courseid = $courseid;

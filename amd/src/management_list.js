@@ -21,8 +21,8 @@
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 
-define(['jquery', 'core/modal_factory', 'core/modal_events', 'core/notification', 'core/str'],
-function($, ModalFactory, ModalEvents, Notification, Str) {
+define(['jquery', 'core/modal_factory', 'core/modal_events', 'core/notification', 'core/str', 'core/ajax'],
+function($, ModalFactory, ModalEvents, Notification, Str, Ajax) {
 
     var ajaxUrl = '';
     var sesskey = '';
@@ -92,7 +92,10 @@ function($, ModalFactory, ModalEvents, Notification, Str) {
             var originalText = btn.text();
             btn.text('...');
 
-            $.get(ajaxUrl, {action: 'preview', id: id, sesskey: sesskey})
+            Ajax.call([{
+                methodname: 'local_mandatoryreminder_preview_email',
+                args: {id: id}
+            }])[0]
              .done(function(data) {
                 if (data.success) {
                     showPreviewModal(data.subject, data.body);
@@ -100,8 +103,8 @@ function($, ModalFactory, ModalEvents, Notification, Str) {
                     Notification.alert('Error', data.error || 'Preview failed');
                 }
              })
-             .fail(function() {
-                Notification.alert('Error', 'Network error occurred');
+             .fail(function(ex) {
+                Notification.exception(ex);
              })
              .always(function() {
                 btn.prop('disabled', false).text(originalText);
@@ -144,43 +147,32 @@ function($, ModalFactory, ModalEvents, Notification, Str) {
             e.preventDefault();
             var id = $(this).data('id');
             var btn = $(this);
-            var row = btn.closest('tr');
             
             btn.prop('disabled', true);
             var originalText = btn.text();
             btn.text('...');
 
-            $.post(ajaxUrl, {action: 'send', id: id, sesskey: sesskey})
+            Ajax.call([{
+                methodname: 'local_mandatoryreminder_queue_single_email',
+                args: {id: id}
+            }])[0]
              .done(function(data) {
                 if (data.success) {
-                    // Update status badge
-                    row.find('.group-status-badge[data-rep="' + id + '"]')
-                        .removeClass('badge-secondary badge-warning badge-danger')
-                        .addClass('badge-success')
-                        .text(data.status);
-                    
-                    // Update timesent
-                    row.find('.timesent-cell[data-rep="' + id + '"]')
-                        .removeClass('text-muted')
-                        .text(data.timesent_formatted);
-                    
-                    // Remove checkbox and send button
-                    row.find('.rowcheckbox').remove();
-                    btn.remove();
-                    
-                    updateBulkBar();
                     Notification.addNotification({
-                        message: 'Email sent successfully',
+                        message: data.message,
                         type: 'success'
                     });
+                    setTimeout(function() {
+                        window.location.reload();
+                    }, 1500);
                 } else {
                     btn.prop('disabled', false).text(originalText);
                     Notification.alert('Error', data.error || 'Send failed');
                 }
              })
-             .fail(function() {
+             .fail(function(ex) {
                 btn.prop('disabled', false).text(originalText);
-                Notification.alert('Error', 'Network error occurred');
+                Notification.exception(ex);
              });
         });
     };
@@ -192,7 +184,7 @@ function($, ModalFactory, ModalEvents, Notification, Str) {
         $('#btn-send-selected').on('click', function(e) {
             e.preventDefault();
             var ids = $('.rowcheckbox:checked').map(function() {
-                return $(this).val();
+                return parseInt($(this).val());
             }).get();
             
             if (!ids.length) {
@@ -202,11 +194,10 @@ function($, ModalFactory, ModalEvents, Notification, Str) {
             var btn = $(this);
             btn.prop('disabled', true);
 
-            $.post(ajaxUrl, {
-                action: 'send_selected',
-                'ids[]': ids,
-                sesskey: sesskey
-            })
+            Ajax.call([{
+                methodname: 'local_mandatoryreminder_queue_selected_emails',
+                args: {ids: ids}
+            }])[0]
              .done(function(data) {
                 if (data.success) {
                     Notification.addNotification({
@@ -221,9 +212,9 @@ function($, ModalFactory, ModalEvents, Notification, Str) {
                     Notification.alert('Error', data.error || 'Send failed');
                 }
              })
-             .fail(function() {
+             .fail(function(ex) {
                 btn.prop('disabled', false);
-                Notification.alert('Error', 'Network error occurred');
+                Notification.exception(ex);
              });
         });
     };
