@@ -95,7 +95,6 @@ $table->text_sorting('fullname');
 $table->text_sorting('coursefullname');
 
 $table->define_header_column('fullname');
-$table->column_suppress('coursefullname');
 $table->column_class('level',          'text-center');
 $table->column_class('status',         'text-center');
 $table->column_class('attempts',       'text-center');
@@ -391,9 +390,8 @@ $table->finish_output();
 
 if (!$table->is_downloading()) {
     // Initialize AMD module for student list actions.
-    $ajaxurl = (new moodle_url('/local/mandatoryreminder/ajax.php'))->out(false);
     $PAGE->requires->js_call_amd('local_mandatoryreminder/student_list', 'init', [
-        $ajaxurl,
+        '',
         sesskey()
     ]);
 

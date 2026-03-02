@@ -260,8 +260,6 @@ function local_mandatoryreminder_get_mandatory_courses() {
         return [];
     }
 
-    // Single query: join course → customfield_data filtered by field + mandatory value.
-    // {customfield_data}.value is LONGTEXT; use sql_compare_text() for cross-DB safety.
     $sql = "SELECT c.id
               FROM {course} c
               JOIN {customfield_data} cd
@@ -289,13 +287,8 @@ function local_mandatoryreminder_get_mandatory_courses() {
 function local_mandatoryreminder_get_incomplete_users($courseid) {
     global $DB;
 
-    // Restrict to users who hold a student-archetype role in the course context.
-    // Teachers, managers, non-editing teachers, etc. are excluded because their
-    // {role}.archetype is not 'student'.
-    // MIN(ue.timecreated) + GROUP BY handles users with multiple active enrolments
-    // (e.g. manual + self-enrol) and always returns the earliest enrolment date.
     $sql = "SELECT u.id, u.email, u.firstname, u.lastname,
-                   MIN(ue.timecreated) AS enroldate
+                   ue.timestart AS enroldate
               FROM {user} u
               JOIN {user_enrolments} ue  ON ue.userid    = u.id
               JOIN {enrol}           e   ON e.id         = ue.enrolid

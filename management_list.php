@@ -397,9 +397,8 @@ $table->finish_output();
 
 if (!$table->is_downloading()) {
     // Initialize AMD module for management list actions.
-    $ajaxurl = (new moodle_url('/local/mandatoryreminder/ajax.php'))->out(false);
     $PAGE->requires->js_call_amd('local_mandatoryreminder/management_list', 'init', [
-        $ajaxurl,
+        '',
         sesskey()
     ]);
 

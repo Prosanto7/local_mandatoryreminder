@@ -20,7 +20,7 @@
  * All email building and dispatch previously scattered across process_queue.php
  * is consolidated here so it can be called from:
  *  - process_queue (batch cron/adhoc)
- *  - ajax.php (human-triggered single / bulk sends)
+ *  - external web services (human-triggered single / bulk sends)
  *
  * @package    local_mandatoryreminder
  * @copyright  2026 Your Name

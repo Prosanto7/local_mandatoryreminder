@@ -92,23 +92,48 @@ class check_reminders extends \core\task\scheduled_task {
                 $enroldate    = $user->enroldate;
                 $deadlinedate = $enroldate + $deadlineseconds;
                 $daysdiff     = ($now - $deadlinedate) / (24 * 60 * 60);
+                $daysenrolled = ($now - $enroldate) / (24 * 60 * 60);
+
+                // Detailed date logging.
+                $enroldatestr    = userdate($enroldate, '%d %b %Y %H:%M');
+                $deadlinedatestr = userdate($deadlinedate, '%d %b %Y %H:%M');
+                $nowstr          = userdate($now, '%d %b %Y %H:%M');
+
+                mtrace('    User (' . fullname($user) . '):');
+                mtrace('      Enrolled: ' . $enroldatestr . ' (' . number_format($daysenrolled, 1) . ' days ago)');
+                mtrace('      Deadline: ' . $deadlinedatestr);
+                mtrace('      Now:      ' . $nowstr);
+                mtrace('      Days diff from deadline: ' . number_format($daysdiff, 1) .
+                    ($daysdiff < 0 ? ' (before deadline)' : ' (overdue)'));
+
+                // Check what levels have already been sent for this user/course.
+                $sentsummary = [];
+                for ($i = 1; $i <= 4; $i++) {
+                    if (local_mandatoryreminder_is_sent($user->id, $courseid, $i)) {
+                        $sentsummary[] = $i;
+                    }
+                }
+                if (!empty($sentsummary)) {
+                    mtrace('      Already sent levels: ' . implode(', ', $sentsummary));
+                } else {
+                    mtrace('      Already sent levels: none');
+                }
 
                 // Determine which level(s) to send.
                 $levels = $this->determine_reminder_levels($daysdiff, $deadline);
 
                 if (empty($levels)) {
-                    mtrace('    User ' . $user->id . ' (' . fullname($user) . '): daysdiff=' .
-                        number_format($daysdiff, 1) . ' — not in any reminder window');
+                    mtrace('      Status: Not in any reminder window — skipping');
+                    mtrace('');
                     continue;
                 }
 
-                mtrace('    User ' . $user->id . ' (' . fullname($user) . '): daysdiff=' .
-                    number_format($daysdiff, 1) . ', level(s): ' . implode(', ', $levels));
+                mtrace('      Matched level(s): ' . implode(', ', $levels));
 
                 foreach ($levels as $level) {
                     // Check if already sent.
                     if (local_mandatoryreminder_is_sent($user->id, $courseid, $level)) {
-                        mtrace("      Level {$level}: already sent — skipping");
+                        mtrace("        Level {$level}: already sent — skipping");
                         $courseskipped++;
                         $totalskipped++;
                         continue;
@@ -119,11 +144,12 @@ class check_reminders extends \core\task\scheduled_task {
                     $coursequeued += $queued;
                     $totalqueued  += $queued;
 
-                    mtrace("      Level {$level}: queued {$queued} email(s)");
+                    mtrace("        Level {$level}: queued {$queued} email(s)");
 
                     // Log as sent to prevent duplicate sends on subsequent cron runs.
                     local_mandatoryreminder_log_sent($user->id, $courseid, $level, $enroldate, $deadlinedate);
                 }
+                mtrace('');
             }
 
             mtrace("  Course done — queued: {$coursequeued}, skipped (already sent): {$courseskipped}");
@@ -144,6 +170,11 @@ class check_reminders extends \core\task\scheduled_task {
     /**
      * Determine which reminder levels should be sent
      *
+     * Note: For users very overdue (e.g., 90+ days), this will only return Level 4.
+     * The assumption is that Levels 1-3 would have been sent previously at their
+     * appropriate times. If the cron is being run for the first time and there are
+     * long-overdue users, only Level 4 will be queued for them.
+     *
      * @param float $daysdiff Days difference (negative before deadline, positive after)
      * @param int $deadline Total deadline in days
      * @return array Array of levels to send
@@ -151,22 +182,23 @@ class check_reminders extends \core\task\scheduled_task {
     private function determine_reminder_levels($daysdiff, $deadline) {
         $levels = [];
         
-        // Level 1: 3 days before deadline.
+        // Level 1: 3 days before deadline to 1 day before.
         if ($daysdiff >= -3 && $daysdiff < -1) {
             $levels[] = 1;
         }
         
-        // Level 2: 1 day before deadline.
+        // Level 2: 1 day before deadline to deadline day.
         if ($daysdiff >= -1 && $daysdiff < 0) {
             $levels[] = 2;
         }
         
-        // Level 3: 1 week (7 days) after deadline.
+        // Level 3: 1 week (7 days) to 2 weeks (14 days) after deadline.
         if ($daysdiff >= 7 && $daysdiff < 14) {
             $levels[] = 3;
         }
         
-        // Level 4: 2 weeks (14 days) after deadline.
+        // Level 4: 2 weeks (14 days) or more after deadline.
+        // This includes anyone 14, 30, 90, or even 180 days overdue.
         if ($daysdiff >= 14) {
             $levels[] = 4;
         }

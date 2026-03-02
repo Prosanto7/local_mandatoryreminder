@@ -24,18 +24,10 @@
 define(['jquery', 'core/modal_factory', 'core/modal_events', 'core/notification', 'core/str', 'core/ajax'],
 function($, ModalFactory, ModalEvents, Notification, Str, Ajax) {
 
-    var ajaxUrl = '';
-    var sesskey = '';
-
     /**
      * Initialize the module.
-     * @param {string} ajax Ajax URL
-     * @param {string} key Session key
      */
-    var init = function(ajax, key) {
-        ajaxUrl = ajax;
-        sesskey = key;
-
+    var init = function() {
         setupSelectAll();
         setupPreview();
         setupSendSingle();
@@ -87,10 +79,9 @@ function($, ModalFactory, ModalEvents, Notification, Str, Ajax) {
             e.preventDefault();
             var id = $(this).data('id');
             var btn = $(this);
-            
+
             btn.prop('disabled', true);
             var originalText = btn.text();
-            btn.text('...');
 
             Ajax.call([{
                 methodname: 'local_mandatoryreminder_preview_email',
@@ -147,10 +138,9 @@ function($, ModalFactory, ModalEvents, Notification, Str, Ajax) {
             e.preventDefault();
             var id = $(this).data('id');
             var btn = $(this);
-            
+
             btn.prop('disabled', true);
             var originalText = btn.text();
-            btn.text('...');
 
             Ajax.call([{
                 methodname: 'local_mandatoryreminder_queue_single_email',
@@ -186,7 +176,7 @@ function($, ModalFactory, ModalEvents, Notification, Str, Ajax) {
             var ids = $('.rowcheckbox:checked').map(function() {
                 return parseInt($(this).val());
             }).get();
-            
+
             if (!ids.length) {
                 return;
             }
