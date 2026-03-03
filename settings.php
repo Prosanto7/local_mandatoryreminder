@@ -105,6 +105,37 @@ if ($hassiteconfig) {
             get_string('level4_sbuhead_template_desc', 'local_mandatoryreminder'),
             get_string('level4_sbuhead_template_default', 'local_mandatoryreminder')
         ));
+
+        // Consolidated email templates.
+        $settings->add(new admin_setting_heading(
+            'local_mandatoryreminder/consolidated_heading',
+            get_string('consolidated_templates_heading', 'local_mandatoryreminder'),
+            get_string('consolidated_templates_desc', 'local_mandatoryreminder')
+        ));
+
+        // Consolidated Employee template.
+        $settings->add(new admin_setting_confightmleditor(
+            'local_mandatoryreminder/consolidated_employee_template',
+            get_string('consolidated_employee_template', 'local_mandatoryreminder'),
+            get_string('consolidated_employee_template_desc', 'local_mandatoryreminder'),
+            get_string('consolidated_employee_template_default', 'local_mandatoryreminder')
+        ));
+
+        // Consolidated Supervisor template.
+        $settings->add(new admin_setting_confightmleditor(
+            'local_mandatoryreminder/consolidated_supervisor_template',
+            get_string('consolidated_supervisor_template', 'local_mandatoryreminder'),
+            get_string('consolidated_supervisor_template_desc', 'local_mandatoryreminder'),
+            get_string('consolidated_supervisor_template_default', 'local_mandatoryreminder')
+        ));
+
+        // Consolidated SBU Head template.
+        $settings->add(new admin_setting_confightmleditor(
+            'local_mandatoryreminder/consolidated_sbuhead_template',
+            get_string('consolidated_sbuhead_template', 'local_mandatoryreminder'),
+            get_string('consolidated_sbuhead_template_desc', 'local_mandatoryreminder'),
+            get_string('consolidated_sbuhead_template_default', 'local_mandatoryreminder')
+        ));
     }
 
     $ADMIN->add('local_mandatoryreminder', $settings);
@@ -115,14 +146,6 @@ if ($hassiteconfig) {
         get_string('course_config', 'local_mandatoryreminder'),
         new moodle_url('/local/mandatoryreminder/course_config.php'),
         'local/mandatoryreminder:configure'
-    ));
-
-    // Add dashboard page.
-    $ADMIN->add('local_mandatoryreminder', new admin_externalpage(
-        'local_mandatoryreminder_dashboard',
-        get_string('dashboard', 'local_mandatoryreminder'),
-        new moodle_url('/local/mandatoryreminder/dashboard.php'),
-        'local/mandatoryreminder:viewdashboard'
     ));
 
     // Add Student Reminder List page.

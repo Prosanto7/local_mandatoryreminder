@@ -142,14 +142,18 @@ class process_queue extends \core\task\adhoc_task {
                         mtrace('    -> Notification: ' . ($notified ? 'sent' : 'skipped'));
                     }
 
-                    $enrol = email_sender::get_enrolment($item->userid, $item->courseid);
-                    if ($enrol) {
-                        $deadline     = local_mandatoryreminder_get_course_deadline($item->courseid);
-                        $deadlinedate = $enrol->timecreated + ($deadline * 86400);
-                        local_mandatoryreminder_log_sent(
-                            $item->userid, $item->courseid, $item->level,
-                            $enrol->timecreated, $deadlinedate
-                        );
+                    // Log each course+level as sent from courses_data.
+                    if (!empty($item->courses_data)) {
+                        $coursesdata = json_decode($item->courses_data, true);
+                        foreach ($coursesdata as $coursedata) {
+                            local_mandatoryreminder_log_sent(
+                                $item->userid,
+                                $coursedata['courseid'],
+                                $coursedata['level'],
+                                $coursedata['enroldate'],
+                                $coursedata['deadlinedate']
+                            );
+                        }
                     }
 
                 } else {

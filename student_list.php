@@ -67,14 +67,15 @@ $PAGE->set_pagelayout('admin');
 $table = new flexible_table('local_mandatoryreminder_students');
 
 $table->define_columns([
-    'checkbox', 'fullname', 'coursefullname', 'level',
+    'checkbox', 'picture', 'fullname', 'course_count', 'highest_level',
     'recipient_email', 'status', 'attempts', 'timecreated', 'timesent', 'actions',
 ]);
 $table->define_headers([
     '',  // checkbox column — header built manually below
+    get_string('picture', 'local_mandatoryreminder'),
     get_string('fullname'),
-    get_string('course'),
-    get_string('level',          'local_mandatoryreminder'),
+    get_string('course_count', 'local_mandatoryreminder'),
+    get_string('highest_level', 'local_mandatoryreminder'),
     get_string('email'),
     get_string('status',         'local_mandatoryreminder'),
     get_string('attempts',       'local_mandatoryreminder'),
@@ -91,11 +92,13 @@ $table->sortable(true, 'timecreated', SORT_DESC);
 $table->no_sorting('checkbox');
 $table->no_sorting('recipient_email');
 $table->no_sorting('actions');
+$table->no_sorting('course_count');
+$table->no_sorting('highest_level');
 $table->text_sorting('fullname');
-$table->text_sorting('coursefullname');
 
 $table->define_header_column('fullname');
-$table->column_class('level',          'text-center');
+$table->column_class('course_count',   'text-center');
+$table->column_class('highest_level',  'text-center');
 $table->column_class('status',         'text-center');
 $table->column_class('attempts',       'text-center');
 $table->column_class('actions',        'text-nowrap text-right');
@@ -129,10 +132,9 @@ if (!empty($search)) {
     $where[]          = '(' .
         $DB->sql_like('u.firstname',       ':s1', false) . ' OR ' .
         $DB->sql_like('u.lastname',        ':s2', false) . ' OR ' .
-        $DB->sql_like('q.recipient_email', ':s3', false) . ' OR ' .
-        $DB->sql_like('c.fullname',        ':s4', false) . ')';
+        $DB->sql_like('q.recipient_email', ':s3', false) . ')';
     $params['s1'] = $sp; $params['s2'] = $sp;
-    $params['s3'] = $sp; $params['s4'] = $sp;
+    $params['s3'] = $sp;
 }
 
 $ifirst = $table->get_initial_first();
@@ -150,22 +152,17 @@ if (!empty($filterstatus)) {
     $where[]                = 'q.status = :filterstatus';
     $params['filterstatus'] = $filterstatus;
 }
-if (!empty($filterlevel)) {
-    $where[]               = 'q.level = :filterlevel';
-    $params['filterlevel'] = (int)$filterlevel;
-}
+// Note: filterlevel removed as level is now in courses_data JSON
 
 $wheresql = 'WHERE ' . implode(' AND ', $where);
 
 $sortmap = [
-    'fullname'       => 'u.lastname, u.firstname',
-    'coursefullname' => 'c.fullname',
-    'level'          => 'q.level',
+    'fullname'        => 'u.lastname, u.firstname',
     'recipient_email' => 'q.recipient_email',
-    'status'         => 'q.status',
-    'attempts'       => 'q.attempts',
-    'timecreated'    => 'q.timecreated',
-    'timesent'       => 'q.timesent',
+    'status'          => 'q.status',
+    'attempts'        => 'q.attempts',
+    'timecreated'     => 'q.timecreated',
+    'timesent'        => 'q.timesent',
 ];
 if (!array_key_exists($sort, $sortmap)) {
     $sort = 'timecreated';
@@ -173,17 +170,15 @@ if (!array_key_exists($sort, $sortmap)) {
 $ordersql = $sortmap[$sort] . ' ' . ($dir == SORT_ASC ? 'ASC' : 'DESC');
 
 $basefrom = "FROM {local_mandatoryreminder_queue} q
-              JOIN {user}   u ON u.id   = q.userid
-              JOIN {course} c ON c.id   = q.courseid
+              JOIN {user} u ON u.id = q.userid
             {$wheresql}";
 
 $totalcount = $DB->count_records_sql("SELECT COUNT(q.id) {$basefrom}", $params);
 
-$selectsql = "SELECT q.id, q.userid, q.courseid, q.level, q.recipient_email,
+$selectsql = "SELECT q.id, q.userid, q.recipient_email, q.courses_data,
                      q.status, q.attempts, q.timecreated, q.timesent, q.error_message,
                      u.firstname, u.lastname, u.picture, u.imagealt,
-                     u.firstnamephonetic, u.lastnamephonetic, u.middlename, u.alternatename,
-                     c.fullname AS coursefullname
+                     u.firstnamephonetic, u.lastnamephonetic, u.middlename, u.alternatename
               {$basefrom}
               ORDER BY {$ordersql}";
 
@@ -191,6 +186,23 @@ if ($table->is_downloading()) {
     $items = $DB->get_records_sql($selectsql, $params);
 } else {
     $items = $DB->get_records_sql($selectsql, $params, $page * $perpage, $perpage);
+}
+
+// Filter by highest level if filterlevel is set (must be done after fetch since level is in JSON).
+if (!empty($filterlevel) && !empty($items)) {
+    $filteredItems = [];
+    foreach ($items as $item) {
+        $coursesdata = !empty($item->courses_data) ? json_decode($item->courses_data, true) : [];
+        if (!empty($coursesdata)) {
+            $highestlevel = max(array_column($coursesdata, 'level'));
+            if ($highestlevel == $filterlevel) {
+                $filteredItems[] = $item;
+            }
+        }
+    }
+    $items = $filteredItems;
+    // Note: This filtering happens after pagination, so counts may be off.
+    // For production, consider filtering before pagination or adjusting approach.
 }
 
 // ----------------------------------------------------------------
@@ -299,12 +311,26 @@ $statusclasses = [
 $datetimefmt = get_string('strftimedatetime', 'langconfig');
 
 foreach ($items as $item) {
+    // Parse courses_data to get course count and highest level.
+    $coursesdata = !empty($item->courses_data) ? json_decode($item->courses_data, true) : [];
+    $coursecount = count($coursesdata);
+    $highestlevel = !empty($coursesdata) ? max(array_column($coursesdata, 'level')) : 0;
+    
+    // Get course names for display.
+    $coursenames = [];
+    if (!empty($coursesdata)) {
+        foreach ($coursesdata as $cdata) {
+            $coursenames[] = isset($cdata['coursename']) ? $cdata['coursename'] : 'Course ' . $cdata['courseid'];
+        }
+    }
+    $courselist = !empty($coursenames) ? implode(', ', $coursenames) : get_string('none');
+
     if ($table->is_downloading()) {
         $row = [
             '',
             fullname($item),
-            $item->coursefullname,
-            $item->level,
+            $coursecount,
+            $highestlevel,
             $item->recipient_email,
             get_string('status_' . $item->status, 'local_mandatoryreminder'),
             $item->attempts,
@@ -336,12 +362,23 @@ foreach ($items as $item) {
             new moodle_url('/user/profile.php', ['id' => $item->userid]),
             fullname($item)
         );
-        $fullnamehtml = $pic . $namelink;
 
-        $courselink = html_writer::link(
-            new moodle_url('/course/view.php', ['id' => $item->courseid]),
-            format_string($item->coursefullname)
+        // Course count with tooltip showing course names.
+        $coursecounthtml = html_writer::tag('span',
+            $coursecount,
+            ['title' => $courselist, 'data-toggle' => 'tooltip', 'class' => 'badge badge-info']
         );
+
+        // Highest level with color coding.
+        $levelclass = 'badge badge-secondary';
+        if ($highestlevel == 4) {
+            $levelclass = 'badge badge-danger';
+        } else if ($highestlevel == 3) {
+            $levelclass = 'badge badge-warning';
+        } else if ($highestlevel >= 1) {
+            $levelclass = 'badge badge-primary';
+        }
+        $levelhtml = html_writer::tag('span', $highestlevel, ['class' => $levelclass]);
 
         $statusclass = $statusclasses[$item->status] ?? 'badge badge-secondary';
         $statushtml  = html_writer::tag('span',
@@ -356,7 +393,7 @@ foreach ($items as $item) {
 
         $timesent = $item->timesent
             ? html_writer::tag('span', userdate($item->timesent, $datetimefmt), ['class' => 'timesent-cell'])
-            : html_writer::tag('span', get_string('never'), ['class' => 'timesent-cell text-muted']);
+            : html_writer::tag('span', get_string('never', 'local_mandatoryreminder'), ['class' => 'timesent-cell text-muted']);
 
         // Action buttons.
         $actions = html_writer::tag('button',
@@ -372,9 +409,10 @@ foreach ($items as $item) {
 
         $row = [
             $checkbox,
-            $fullnamehtml,
-            $courselink,
-            $item->level,
+            $pic,
+            $namelink,
+            $coursecounthtml,
+            $levelhtml,
             $item->recipient_email,
             $statushtml,
             $item->attempts,

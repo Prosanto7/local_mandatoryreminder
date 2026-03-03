@@ -46,8 +46,7 @@
       <FIELDS>
         <FIELD NAME="id" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="true"/>
         <FIELD NAME="userid" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="false"/>
-        <FIELD NAME="courseid" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="false"/>
-        <FIELD NAME="level" TYPE="int" LENGTH="2" NOTNULL="true" SEQUENCE="false"/>
+        <FIELD NAME="courses_data" TYPE="text" NOTNULL="false" SEQUENCE="false" COMMENT="JSON array of course data objects with courseid, level, enroldate, deadline, daysoverdue"/>
         <FIELD NAME="recipient_type" TYPE="char" LENGTH="20" NOTNULL="true" SEQUENCE="false" COMMENT="employee, supervisor, sbuhead"/>
         <FIELD NAME="recipient_email" TYPE="char" LENGTH="255" NOTNULL="true" SEQUENCE="false"/>
         <FIELD NAME="status" TYPE="char" LENGTH="20" NOTNULL="true" DEFAULT="pending" SEQUENCE="false" COMMENT="pending, processing, sent, failed"/>
@@ -62,11 +61,11 @@
       <KEYS>
         <KEY NAME="primary" TYPE="primary" FIELDS="id"/>
         <KEY NAME="userid" TYPE="foreign" FIELDS="userid" REFTABLE="user" REFFIELDS="id"/>
-        <KEY NAME="courseid" TYPE="foreign" FIELDS="courseid" REFTABLE="course" REFFIELDS="id"/>
       </KEYS>
       <INDEXES>
         <INDEX NAME="status_idx" UNIQUE="false" FIELDS="status"/>
         <INDEX NAME="timecreated_idx" UNIQUE="false" FIELDS="timecreated"/>
+        <INDEX NAME="userid_recipienttype_idx" UNIQUE="false" FIELDS="userid, recipient_type"/>
       </INDEXES>
     </TABLE>
   </TABLES>

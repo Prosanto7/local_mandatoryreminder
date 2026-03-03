@@ -50,10 +50,8 @@ class email_sender {
      * @return string Raw HTML template string
      */
     public static function get_template(int $level, string $recipienttype): string {
-        // Levels 1 & 2 only target employees; their config keys carry no type suffix.
-        $key = ($level <= 2)
-            ? 'level' . $level . '_template'
-            : 'level' . $level . '_' . $recipienttype . '_template';
+        // For consolidated emails, use new consolidated template keys.
+        $key = 'consolidated_' . $recipienttype . '_template';
 
         $template = get_config('local_mandatoryreminder', $key);
 
@@ -63,50 +61,117 @@ class email_sender {
     }
 
     /**
-     * Return the email subject for a given level and course.
+     * Return the email subject for consolidated emails.
      *
-     * @param int       $level  Reminder level
-     * @param \stdClass $course Course object (needs ->fullname)
+     * @param string $recipienttype 'employee' | 'supervisor' | 'sbuhead'
+     * @param int $coursecount Number of courses in the email
      * @return string
      */
-    public static function get_subject(int $level, \stdClass $course): string {
+    public static function get_subject(string $recipienttype, int $coursecount = 1): string {
         return get_string(
-            'email_subject_level' . $level,
+            'email_subject_consolidated_' . $recipienttype,
             'local_mandatoryreminder',
-            format_string($course->fullname)
+            $coursecount
         );
     }
 
     /**
-     * Pre-render employee email at queue time and return subject + body.
+     * Pre-render consolidated employee email at queue time and return subject + body.
      *
-     * This result is stored in the queue row so preview and dispatch can use the
-     * static DB value instead of re-running template processing on every request.
-     *
-     * @param \stdClass $user        Employee user object
-     * @param \stdClass $course      Course object
-     * @param int       $level       Reminder level
-     * @param float     $daysoverdue Days diff (negative = before deadline)
+     * @param \stdClass $user User object
+     * @param array $coursesdata Array of course data objects
      * @return array ['subject' => string, 'body' => string]
      */
-    public static function prerender_employee(
-        \stdClass $user,
-        \stdClass $course,
-        int $level,
-        float $daysoverdue
-    ): array {
-        $template = self::get_template($level, 'employee');
-        $body     = local_mandatoryreminder_process_template($template, $user, $course, $daysoverdue);
-        $subject  = self::get_subject($level, $course);
+    public static function prerender_employee(\stdClass $user, array $coursesdata): array {
+        global $CFG;
+
+        $template = self::get_template(0, 'employee'); // Level doesn't matter for consolidated.
+        $subject  = self::get_subject('employee', count($coursesdata));
+
+        // Build course table sorted by level (Level 4 first).
+        usort($coursesdata, function($a, $b) {
+            return $b['level'] - $a['level'];
+        });
+
+        $coursetable = self::build_employee_course_table($coursesdata);
+
+        $body = str_replace(
+            ['{fullname}', '{firstname}', '{lastname}', '{course_table}', '{sitename}'],
+            [fullname($user), $user->firstname, $user->lastname, $coursetable, format_string($CFG->fullname)],
+            $template
+        );
+
         return ['subject' => $subject, 'body' => $body];
     }
 
     /**
-     * Build preview data (subject + body) for any queue item.
+     * Build the HTML course table for employee emails.
      *
-     * Employee items: returns the pre-stored DB body if available; otherwise
-     * re-computes it.  Supervisor / SBU-head items always compute dynamically
-     * from the current set of pending employees so the preview stays accurate.
+     * @param array $coursesdata Array of course data objects
+     * @return string HTML table
+     */
+    private static function build_employee_course_table(array $coursesdata): string {
+        $html = '<table border="1" cellpadding="8" cellspacing="0" style="border-collapse: collapse; width: 100%;">';
+        $html .= '<thead><tr style="background-color: #f0f0f0;">';
+        $html .= '<th>Escalation Level</th><th>Course Name</th><th>Deadline</th><th>Status</th><th>Action</th>';
+        $html .= '</tr></thead><tbody>';
+
+        foreach ($coursesdata as $data) {
+            $courseid = $data['courseid'];
+            $coursename = isset($data['coursename']) ? $data['coursename'] : format_string(get_course($courseid)->fullname);
+            $level = $data['level'];
+            $daysoverdue = $data['daysoverdue'];
+            
+            $deadline = userdate($data['deadlinedate'], '%d %b %Y');
+            
+            // Status string.
+            if ($daysoverdue < 0) {
+                $status = 'Due in ' . abs(round($daysoverdue)) . ' days';
+            } else {
+                $status = '<strong style="color: red;">Overdue by ' . round($daysoverdue) . ' days</strong>';
+            }
+
+            // Convert level to escalation label.
+            $leveltext = self::get_escalation_label($level);
+
+            $courseurl = new \moodle_url('/course/view.php', ['id' => $courseid]);
+            $action = '<a href="' . $courseurl->out(false) . '">Go to Course</a>';
+
+            $html .= "<tr>";
+            $html .= "<td>{$leveltext}</td>";
+            $html .= "<td>{$coursename}</td>";
+            $html .= "<td>{$deadline}</td>";
+            $html .= "<td>{$status}</td>";
+            $html .= "<td>{$action}</td>";
+            $html .= "</tr>";
+        }
+
+        $html .= '</tbody></table>';
+        return $html;
+    }
+
+    /**
+     * Get escalation label for a given level.
+     * @param int $level Level number (1-4)
+     * @return string HTML formatted escalation label
+     */
+    private static function get_escalation_label(int $level): string {
+        switch ($level) {
+            case 1:
+                return '<span style="color: orange;">First Escalation</span>';
+            case 2:
+                return '<span style="color: orange;">Second Escalation</span>';
+            case 3:
+                return '<span style="color: red;">Third Escalation</span>';
+            case 4:
+                return '<span style="color: darkred; font-weight: bold;">Final Escalation</span>';
+            default:
+                return "Escalation Level {$level}";
+        }
+    }
+
+    /**
+     * Build preview data (subject + body) for any queue item.
      *
      * @param \stdClass $item Queue row (all columns)
      * @return array ['subject' => string, 'body' => string]
@@ -114,53 +179,68 @@ class email_sender {
     public static function get_preview(\stdClass $item): array {
         global $DB, $CFG;
 
-        $course = get_course($item->courseid);
+        // Parse courses data.
+        $coursesdata = !empty($item->courses_data) ? json_decode($item->courses_data, true) : [];
+
+        if (empty($coursesdata)) {
+            return ['subject' => '', 'body' => 'No course data available'];
+        }
 
         // --- Employee ---
         if ($item->recipient_type === 'employee') {
+            // Check if pre-rendered.
             if (!empty($item->email_subject) && !empty($item->email_body)) {
                 return ['subject' => $item->email_subject, 'body' => $item->email_body];
             }
-            // Fallback: recompute (covers rows created before the schema upgrade).
+
+            // Re-render.
             $user = $DB->get_record('user', ['id' => $item->userid]);
             if (!$user) {
-                return ['subject' => '', 'body' => ''];
+                return ['subject' => '', 'body' => 'User not found'];
             }
-            $enrol       = self::get_enrolment($item->userid, $item->courseid);
-            $deadline    = local_mandatoryreminder_get_course_deadline($item->courseid);
-            $ddatestamp  = $enrol ? ($enrol->timecreated + $deadline * 86400) : time();
-            $daysoverdue = (time() - $ddatestamp) / 86400;
-            return self::prerender_employee($user, $course, $item->level, $daysoverdue);
+            return self::prerender_employee($user, $coursesdata);
         }
 
         // --- Supervisor ---
         if ($item->recipient_type === 'supervisor') {
-            $employees = self::get_employees_for_supervisor(
-                $item->recipient_email, $item->courseid, $item->level
-            );
-            $table    = self::build_employee_table($employees, $course);
-            $template = self::get_template($item->level, 'supervisor');
-            $body     = str_replace(
+            $user = $DB->get_record('user', ['id' => $item->userid]);
+            if (!$user) {
+                return ['subject' => '', 'body' => 'User not found'];
+            }
+
+            $template = self::get_template(0, 'supervisor');
+            $subject  = self::get_subject('supervisor', count($coursesdata));
+
+            // Build employee table for supervisor.
+            $employeetable = self::build_supervisor_employee_table($user, $coursesdata);
+
+            $body = str_replace(
                 ['{employee_table}', '{sitename}'],
-                [$table, format_string($CFG->fullname)],
+                [$employeetable, format_string($CFG->fullname)],
                 $template
             );
-            return ['subject' => self::get_subject($item->level, $course), 'body' => $body];
+
+            return ['subject' => $subject, 'body' => $body];
         }
 
         // --- SBU Head ---
         if ($item->recipient_type === 'sbuhead') {
-            $managers = self::get_managers_for_sbuhead(
-                $item->recipient_email, $item->courseid, $item->level
-            );
-            $table    = self::build_manager_table($managers, $course);
-            $template = self::get_template($item->level, 'sbuhead');
-            $body     = str_replace(
+            // Get all employees under this SBU head.
+            $employees = self::get_employees_for_sbuhead($item->recipient_email);
+
+            $template = self::get_template(0, 'sbuhead');
+            $subject  = self::get_subject('sbuhead', count($employees));
+
+            // Build manager table.
+            $managertable = self::build_sbuhead_manager_table($employees, $coursesdata);
+
+            $body = str_replace(
                 ['{manager_table}', '{sitename}'],
-                [$table, format_string($CFG->fullname)],
+                [$managertable, format_string($CFG->fullname)],
                 $template
             );
-            return ['subject' => self::get_subject($item->level, $course), 'body' => $body];
+
+            return ['subject' => $subject, 'body' => $body];
         }
 
         return ['subject' => '', 'body' => ''];
@@ -203,40 +283,16 @@ class email_sender {
 
     /**
      * After a management (supervisor/sbuhead) item is successfully sent, mark
-     * all sibling queue rows (same recipient+course+level+type) as 'sent'.
+     * all sibling queue rows (same recipient+type) as 'sent'.
      *
-     * This prevents multiple emails going out to the same supervisor when the
-     * batch contains several employee rows pointing to the same supervisor.
+     * For consolidated emails, this is simpler - we just mark this one item as sent.
      *
      * @param \stdClass $item The item that was just successfully sent
      */
     public static function mark_siblings_sent(\stdClass $item): void {
-        global $DB;
-
-        if ($item->recipient_type === 'employee') {
-            return; // No siblings for employee items.
-        }
-
-        $now = time();
-        $DB->execute(
-            "UPDATE {local_mandatoryreminder_queue}
-                SET status = 'sent', timesent = :timesent, timemodified = :timemod
-              WHERE recipient_type  = :rtype
-                AND recipient_email = :remail
-                AND courseid        = :courseid
-                AND level           = :level
-                AND status         IN ('pending', 'processing')
-                AND id             != :id",
-            [
-                'timesent' => $now,
-                'timemod'  => $now,
-                'rtype'    => $item->recipient_type,
-                'remail'   => $item->recipient_email,
-                'courseid' => $item->courseid,
-                'level'    => $item->level,
-                'id'       => $item->id,
-            ]
-        );
+        // For consolidated approach, there are no siblings since one email = one user.
+        // This method is kept for compatibility but does nothing now.
+        return;
     }
 
     /**
@@ -253,12 +309,19 @@ class email_sender {
             return true;
         }
 
-        $user   = $DB->get_record('user', ['id' => $item->userid]);
-        $course = get_course($item->courseid);
-
-        if (!$user || !$course) {
+        $user = $DB->get_record('user', ['id' => $item->userid]);
+        if (!$user) {
             return false;
         }
+
+        // Parse courses data to get count and highest level.
+        $coursesdata = !empty($item->courses_data) ? json_decode($item->courses_data, true) : [];
+        if (empty($coursesdata)) {
+            return false;
+        }
+
+        $coursecount = count($coursesdata);
+        $highestlevel = max(array_column($coursesdata, 'level'));
 
         $message                   = new \core\message\message();
         $message->component        = 'local_mandatoryreminder';
@@ -266,24 +329,25 @@ class email_sender {
         $message->userfrom         = \core_user::get_noreply_user();
         $message->userto           = $user;
         $message->subject          = get_string(
-            'notification_subject_level' . $item->level,
+            'notification_subject_consolidated',
             'local_mandatoryreminder',
-            format_string($course->fullname)
+            $coursecount
         );
         $message->fullmessage      = get_string(
-            'notification_message_level' . $item->level,
+            'notification_message_consolidated',
             'local_mandatoryreminder',
-            format_string($course->fullname)
+            ['count' => $coursecount, 'level' => $highestlevel]
         );
         $message->fullmessageformat = FORMAT_PLAIN;
         $message->fullmessagehtml  = '';
         $message->smallmessage     = get_string(
-            'notification_small_level' . $item->level,
-            'local_mandatoryreminder'
+            'notification_small_consolidated',
+            'local_mandatoryreminder',
+            $coursecount
         );
         $message->notification     = 1;
-        $message->contexturl       = (new \moodle_url('/course/view.php', ['id' => $course->id]))->out(false);
-        $message->contexturlname   = format_string($course->fullname);
+        $message->contexturl       = (new \moodle_url('/local/mandatoryreminder/student_list.php'))->out(false);
+        $message->contexturlname   = get_string('dashboard', 'local_mandatoryreminder');
 
         return message_send($message) !== false;
     }
@@ -301,9 +365,11 @@ class email_sender {
     }
 
     /**
-     * Send an aggregated email to a supervisor, CC-ing each employee.
+     * Send an aggregated email to a supervisor, CC-ing the employee.
      */
     private static function mail_supervisor(\stdClass $item, string $subject, string $body): bool {
+        global $DB;
+
         $noreply = \core_user::get_noreply_user();
 
         $recipient             = clone $noreply;
@@ -314,13 +380,11 @@ class email_sender {
 
         $success = email_to_user($recipient, $noreply, $subject, html_to_text($body), $body);
 
-        // CC each employee.
-        $employees = self::get_employees_for_supervisor(
-            $item->recipient_email, $item->courseid, $item->level
-        );
-        foreach ($employees as $emp) {
+        // CC the employee.
+        $employee = $DB->get_record('user', ['id' => $item->userid]);
+        if ($employee) {
             $cc             = clone $noreply;
-            $cc->email      = $emp->email;
+            $cc->email      = $employee->email;
             $cc->firstname  = '';
             $cc->lastname   = '';
             $cc->mailformat = 1;
@@ -331,9 +395,11 @@ class email_sender {
     }
 
     /**
-     * Send an aggregated email to an SBU head, CC-ing each supervisor (manager).
+     * Send an aggregated email to an SBU head, CC-ing the supervisor.
      */
     private static function mail_sbuhead(\stdClass $item, string $subject, string $body): bool {
+        global $DB;
+
         $noreply = \core_user::get_noreply_user();
 
         $recipient             = clone $noreply;
@@ -344,17 +410,11 @@ class email_sender {
 
         $success = email_to_user($recipient, $noreply, $subject, html_to_text($body), $body);
 
-        // CC each unique supervisor (manager).
-        $managers  = self::get_managers_for_sbuhead($item->recipient_email, $item->courseid, $item->level);
-        $ccemails  = [];
-        foreach ($managers as $mgr) {
-            if (!empty($mgr['supervisor_email']) && !in_array($mgr['supervisor_email'], $ccemails)) {
-                $ccemails[] = $mgr['supervisor_email'];
-            }
-        }
-        foreach ($ccemails as $ccemail) {
+        // CC the supervisor.
+        $supervisoremail = local_mandatoryreminder_get_user_custom_field($item->userid, 'SupervisorEmail');
+        if ($supervisoremail && validate_email($supervisoremail)) {
             $cc             = clone $noreply;
-            $cc->email      = $ccemail;
+            $cc->email      = $supervisoremail;
             $cc->firstname  = '';
             $cc->lastname   = '';
             $cc->mailformat = 1;
@@ -388,56 +448,62 @@ class email_sender {
     }
 
     /**
-     * Get all employees under a supervisor who have pending/processing queue rows
-     * for the given course+level (used for aggregated supervisor email body).
+     * Build the HTML employee table for supervisor emails.
      *
-     * @param string $supervisoremail
-     * @param int    $courseid
-     * @param int    $level
-     * @return array Keyed by user ID
+     * @param \stdClass $employee Employee user object
+     * @param array $coursesdata Array of course data
+     * @return string HTML table
      */
-    public static function get_employees_for_supervisor(
-        string $supervisoremail,
-        int $courseid,
-        int $level
-    ): array {
-        global $DB;
+    private static function build_supervisor_employee_table(\stdClass $employee, array $coursesdata): string {
+        $html = '<h3>' . fullname($employee) . ' (' . $employee->email . ')</h3>';
+        $html .= '<table border="1" cellpadding="8" cellspacing="0" style="border-collapse: collapse; width: 100%;">';
+        $html .= '<thead><tr style="background-color: #f0f0f0;">';
+        $html .= '<th>Escalation Level</th><th>Course Name</th><th>Deadline</th><th>Status</th>';
+        $html .= '</tr></thead><tbody>';
 
-        return $DB->get_records_sql(
-            "SELECT DISTINCT u.id, u.email, u.firstname, u.lastname,
-                             u.firstnamephonetic, u.lastnamephonetic,
-                             u.middlename, u.alternatename
-               FROM {local_mandatoryreminder_queue} q
-               JOIN {user} u ON u.id = q.userid
-              WHERE q.courseid        = :courseid
-                AND q.level           = :level
-                AND q.recipient_type  = 'supervisor'
-                AND q.recipient_email = :email
-                AND q.status         IN ('pending', 'processing')",
-            ['courseid' => $courseid, 'level' => $level, 'email' => $supervisoremail]
-        );
+        foreach ($coursesdata as $data) {
+            $courseid = $data['courseid'];
+            $coursename = isset($data['coursename']) ? $data['coursename'] : format_string(get_course($courseid)->fullname);
+            $level = $data['level'];
+            $daysoverdue = $data['daysoverdue'];
+            
+            $deadline = userdate($data['deadlinedate'], '%d %b %Y');
+            
+            if ($daysoverdue < 0) {
+                $status = 'Due in ' . abs(round($daysoverdue)) . ' days';
+            } else {
+                $status = '<strong style="color: red;">Overdue by ' . round($daysoverdue) . ' days</strong>';
+            }
+
+            // Use escalation label.
+            $leveltext = self::get_escalation_label($level);
+
+            $html .= "<tr>";
+            $html .= "<td>{$leveltext}</td>";
+            $html .= "<td>{$coursename}</td>";
+            $html .= "<td>{$deadline}</td>";
+            $html .= "<td>{$status}</td>";
+            $html .= "</tr>";
+        }
+
+        $html .= '</tbody></table>';
+        return $html;
     }
 
     /**
-     * Get all employees under an SBU head (grouped by their supervisor) who have
-     * pending/processing queue rows for the given course+level.
+     * Get all employees under an SBU head.
      *
      * @param string $sbuheademail
-     * @param int    $courseid
-     * @param int    $level
-     * @return array Keyed by supervisor_email; each value: ['supervisor_email', 'employees' => []]
+     * @return array Array of employee data with their supervisors and courses
      */
-    public static function get_managers_for_sbuhead(
-        string $sbuheademail,
-        int $courseid,
-        int $level
-    ): array {
+    public static function get_employees_for_sbuhead(string $sbuheademail): array {
         global $DB;
 
-        $employees = $DB->get_records_sql(
-            "SELECT DISTINCT u.id, u.email, u.firstname, u.lastname,
-                             u.firstnamephonetic, u.lastnamephonetic,
-                             u.middlename, u.alternatename,
+        // Get all pending queue items for this SBU head.
+        $queueitems = $DB->get_records_sql(
+            "SELECT q.*, u.email, u.firstname, u.lastname,
+                    u.firstnamephonetic, u.lastnamephonetic,
+                    u.middlename, u.alternatename,
                     (SELECT d.data
                        FROM {user_info_data}  d
                        JOIN {user_info_field} f ON d.fieldid = f.id
@@ -445,51 +511,90 @@ class email_sender {
                     ) AS supervisor_email
                FROM {local_mandatoryreminder_queue} q
                JOIN {user} u ON u.id = q.userid
-              WHERE q.courseid        = :courseid
-                AND q.level           = :level
-                AND q.recipient_type  = 'sbuhead'
+              WHERE q.recipient_type  = 'sbuhead'
                 AND q.recipient_email = :email
                 AND q.status         IN ('pending', 'processing')",
-            ['courseid' => $courseid, 'level' => $level, 'email' => $sbuheademail]
+            ['email' => $sbuheademail]
         );
 
-        $managers = [];
-        foreach ($employees as $emp) {
-            $key = $emp->supervisor_email ?: '';
-            if (!isset($managers[$key])) {
-                $managers[$key] = ['supervisor_email' => $key, 'employees' => []];
-            }
-            $managers[$key]['employees'][] = $emp;
+        $employees = [];
+        foreach ($queueitems as $item) {
+            $employees[] = [
+                'user' => $item,
+                'supervisor_email' => $item->supervisor_email,
+                'courses_data' => !empty($item->courses_data) ? json_decode($item->courses_data, true) : []
+            ];
         }
 
-        return $managers;
+        return $employees;
     }
 
     /**
-     * Build the HTML employee list inserted into supervisor templates via {employee_table}.
+     * Build the HTML manager+employee table for SBU head emails.
+     *
+     * @param array $employees Array of employee data
+     * @param array $coursesdata Array of course data (not used, kept for compatibility)
+     * @return string HTML table
      */
-    public static function build_employee_table(array $employees, \stdClass $course): string {
-        $html  = '<p><strong>' . format_string($course->fullname) . '</strong></p>';
-        $html .= '<ul>';
-        foreach ($employees as $emp) {
-            $html .= '<li>' . fullname($emp) . ' (' . $emp->email . ')</li>';
-        }
-        $html .= '</ul>';
-        return $html;
-    }
-
-    /**
-     * Build the HTML manager+employee table inserted into SBU head templates via {manager_table}.
-     */
-    public static function build_manager_table(array $managers, \stdClass $course): string {
-        $html = '<p><strong>' . format_string($course->fullname) . '</strong></p>';
-        foreach ($managers as $mgr) {
-            $html .= '<p><strong>Manager: ' . s($mgr['supervisor_email']) . '</strong></p><ul>';
-            foreach ($mgr['employees'] as $emp) {
-                $html .= '<li>' . fullname($emp) . ' (' . $emp->email . ')</li>';
+    private static function build_sbuhead_manager_table(array $employees, array $coursesdata): string {
+        // Group employees by supervisor.
+        $grouped = [];
+        foreach ($employees as $empdata) {
+            $supervisoremail = $empdata['supervisor_email'] ?: 'Unknown Supervisor';
+            if (!isset($grouped[$supervisoremail])) {
+                $grouped[$supervisoremail] = [];
             }
-            $html .= '</ul>';
+            $grouped[$supervisoremail][] = $empdata;
         }
+
+        $html = '';
+        foreach ($grouped as $supervisoremail => $emps) {
+            $html .= '<h3>Supervisor: ' . s($supervisoremail) . '</h3>';
+            
+            foreach ($emps as $empdata) {
+                $user = $empdata['user'];
+                $courses = $empdata['courses_data'];
+                
+                // Sort by level.
+                usort($courses, function($a, $b) {
+                    return $b['level'] - $a['level'];
+                });
+
+                $html .= '<h4>' . fullname($user) . ' (' . $user->email . ')</h4>';
+                $html .= '<table border="1" cellpadding="8" cellspacing="0" style="border-collapse: collapse; width: 100%; margin-bottom: 20px;">';
+                $html .= '<thead><tr style="background-color: #f0f0f0;">';
+                $html .= '<th>Escalation Level</th><th>Course Name</th><th>Deadline</th><th>Status</th>';
+                $html .= '</tr></thead><tbody>';
+
+                foreach ($courses as $data) {
+                    $courseid = $data['courseid'];
+                    $coursename = isset($data['coursename']) ? $data['coursename'] : format_string(get_course($courseid)->fullname);
+                    $level = $data['level'];
+                    $daysoverdue = $data['daysoverdue'];
+                    
+                    $deadline = userdate($data['deadlinedate'], '%d %b %Y');
+                    
+                    if ($daysoverdue < 0) {
+                        $status = 'Due in ' . abs(round($daysoverdue)) . ' days';
+                    } else {
+                        $status = '<strong style="color: red;">Overdue by ' . round($daysoverdue) . ' days</strong>';
+                    }
+
+                    // Use escalation label.
+                    $leveltext = self::get_escalation_label($level);
+
+                    $html .= "<tr>";
+                    $html .= "<td>{$leveltext}</td>";
+                    $html .= "<td>{$coursename}</td>";
+                    $html .= "<td>{$deadline}</td>";
+                    $html .= "<td>{$status}</td>";
+                    $html .= "</tr>";
+                }
+
+                $html .= '</tbody></table>';
+            }
+        }
+
         return $html;
     }
 }

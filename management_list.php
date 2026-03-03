@@ -67,16 +67,14 @@ $PAGE->set_pagelayout('admin');
 $table = new flexible_table('local_mandatoryreminder_management');
 
 $table->define_columns([
-    'checkbox', 'recipient', 'coursefullname',
-    'recipient_type', 'level', 'employee_count',
+    'checkbox', 'recipient',
+    'recipient_type', 'employee_count',
     'status', 'timecreated', 'timesent', 'actions',
 ]);
 $table->define_headers([
     '',
     get_string('recipient',      'local_mandatoryreminder'),
-    get_string('course'),
     get_string('recipient_type', 'local_mandatoryreminder'),
-    get_string('level',          'local_mandatoryreminder'),
     get_string('employees',      'local_mandatoryreminder'),
     get_string('status',         'local_mandatoryreminder'),
     get_string('created',        'local_mandatoryreminder'),
@@ -93,9 +91,6 @@ $table->no_sorting('checkbox');
 $table->no_sorting('recipient');
 $table->no_sorting('status');
 $table->no_sorting('actions');
-$table->text_sorting('coursefullname');
-
-$table->column_class('level',          'text-center');
 $table->column_class('employee_count', 'text-center');
 $table->column_class('status',         'text-center');
 $table->column_class('checkbox',       'text-center');
@@ -139,18 +134,14 @@ if (!empty($filtertype)) {
     $where[]              = 'q.recipient_type = :filtertype';
     $params['filtertype'] = $filtertype;
 }
-if (!empty($filterlevel)) {
-    $where[]               = 'q.level = :filterlevel';
-    $params['filterlevel'] = (int)$filterlevel;
-}
+// Note: filterlevel removed as level is now in courses_data JSON
 
 $wheresql = 'WHERE ' . implode(' AND ', $where);
 
 // Allowed sort columns → SQL expressions on the grouped result.
+// Note: removed coursefullname and level from sortmap as they're now in JSON
 $sortmap = [
-    'coursefullname'  => 'c.fullname',
     'recipient_type'  => 'q.recipient_type',
-    'level'           => 'q.level',
     'employee_count'  => 'employee_count',
     'timecreated'     => 'timecreated',
     'timesent'        => 'timesent',
@@ -160,26 +151,20 @@ if (!array_key_exists($sort, $sortmap)) {
 }
 $ordersql = $sortmap[$sort] . ' ' . ($dir == SORT_ASC ? 'ASC' : 'DESC');
 
-// The GROUP BY aggregation (MySQL / PostgreSQL / MSSQL compatible CASE WHEN).
+// The GROUP BY aggregation - one row per recipient (consolidated)
+// In consolidated mode, each queue item already represents one email per recipient
 $groupbysql = "
     SELECT
-        MIN(q.id)           AS representative_id,
+        q.id                AS representative_id,
         q.recipient_email,
         q.recipient_type,
-        q.courseid,
-        q.level,
-        c.fullname          AS coursefullname,
-        COUNT(q.id)         AS employee_count,
-        SUM(CASE WHEN q.status = 'pending'    THEN 1 ELSE 0 END) AS pending_count,
-        SUM(CASE WHEN q.status = 'sent'       THEN 1 ELSE 0 END) AS sent_count,
-        SUM(CASE WHEN q.status = 'failed'     THEN 1 ELSE 0 END) AS failed_count,
-        SUM(CASE WHEN q.status = 'processing' THEN 1 ELSE 0 END) AS processing_count,
-        MIN(q.timecreated)  AS timecreated,
-        MAX(q.timesent)     AS timesent
+        q.courses_data,
+        q.status,
+        q.error_message,
+        q.timecreated,
+        q.timesent
     FROM {local_mandatoryreminder_queue} q
-    JOIN {course} c ON c.id = q.courseid
     {$wheresql}
-    GROUP BY q.recipient_email, q.recipient_type, q.courseid, q.level, c.fullname
 ";
 
 $countsql = "SELECT COUNT(*) FROM ({$groupbysql}) grouped_counts";
@@ -259,17 +244,6 @@ if (!$table->is_downloading()) {
         ['id' => 'filtertype', 'class' => 'custom-select custom-select-sm']);
     echo html_writer::end_div();
 
-    // Level filter.
-    $selectedlevel = $filterlevel ? (string)$filterlevel : '';
-    echo html_writer::start_div('form-group form-group-sm mb-0 mr-2');
-    echo html_writer::select([
-        ''  => get_string('allevels', 'local_mandatoryreminder'),
-        '3' => get_string('level', 'local_mandatoryreminder') . ' 3',
-        '4' => get_string('level', 'local_mandatoryreminder') . ' 4',
-    ], 'filterlevel', $selectedlevel, false,
-        ['id' => 'filterlevel', 'class' => 'custom-select custom-select-sm']);
-    echo html_writer::end_div();
-
     echo html_writer::empty_tag('input', [
         'type' => 'submit', 'value' => get_string('filter', 'local_mandatoryreminder'),
         'class' => 'btn btn-secondary btn-sm mr-1',
@@ -292,51 +266,64 @@ $table->pagesize($perpage, $totalcount);
 $datetimefmt = get_string('strftimedatetime', 'langconfig');
 
 foreach ($groups as $group) {
-    // Derive group status.
-    if ($group->pending_count > 0) {
-        $groupstatus = 'pending';
-    } else if ($group->processing_count > 0) {
-        $groupstatus = 'processing';
-    } else if ($group->failed_count > 0) {
-        $groupstatus = 'failed';
-    } else {
-        $groupstatus = 'sent';
+    // Parse courses_data to calculate metrics.
+    $coursesdata = !empty($group->courses_data) ? json_decode($group->courses_data, true) : [];
+    
+    // For management emails (supervisors/SBU heads), courses_data contains employee data
+    // Each item has: userid, firstname, lastname, courses (array of course objects)
+    // Calculate total unique courses and highest level across all employees
+    $allcourses = [];
+    $alllevels = [];
+    $employeecount = count($coursesdata);
+    
+    foreach ($coursesdata as $empdata) {
+        if (isset($empdata['courses']) && is_array($empdata['courses'])) {
+            foreach ($empdata['courses'] as $cdata) {
+                if (isset($cdata['courseid'])) {
+                    $allcourses[$cdata['courseid']] = true;
+                }
+                if (isset($cdata['level'])) {
+                    $alllevels[] = $cdata['level'];
+                }
+            }
+        }
     }
+    
+    $coursecount = count($allcourses);
+    $highestlevel = !empty($alllevels) ? max($alllevels) : 0;
 
     if ($table->is_downloading()) {
         $row = [
             '',
             $group->recipient_email,
-            $group->coursefullname,
             get_string('recipient_' . $group->recipient_type, 'local_mandatoryreminder'),
-            $group->level,
-            $group->employee_count,
-            get_string('status_' . $groupstatus, 'local_mandatoryreminder'),
+            $employeecount,
+            get_string('status_' . $group->status, 'local_mandatoryreminder'),
             userdate($group->timecreated, $datetimefmt),
             $group->timesent ? userdate($group->timesent, $datetimefmt) : '',
             '',
         ];
     } else {
-        // Checkbox (only for pending groups).
-        $checkbox = ($groupstatus === 'pending')
+        // Checkbox (only for pending items).
+        $checkbox = ($group->status === 'pending')
             ? html_writer::checkbox('rowids[]', $group->representative_id, false, '',
                 ['class' => 'rowcheckbox', 'data-id' => $group->representative_id])
             : '';
 
-        // Recipient column: just email address.
+        // Recipient column: avatar + profile link when the email maps to a Moodle user.
         $recipientuser = $userbyemail[$group->recipient_email] ?? null;
-        $displayname = $recipientuser ? fullname($recipientuser) : '';
-        if ($displayname) {
-            $recipienthtml = html_writer::tag('strong', $displayname) . '<br>' .
+        if ($recipientuser) {
+            $pic = $OUTPUT->user_picture($recipientuser,
+                ['size' => 35, 'link' => false, 'class' => 'rounded-circle mr-2']);
+            $namelink = html_writer::link(
+                new moodle_url('/user/profile.php', ['id' => $recipientuser->id]),
+                fullname($recipientuser)
+            );
+            $recipienthtml = $pic . $namelink . '<br>' .
                 html_writer::tag('small', $group->recipient_email, ['class' => 'text-muted']);
         } else {
             $recipienthtml = $group->recipient_email;
         }
-
-        $courselink = html_writer::link(
-            new moodle_url('/course/view.php', ['id' => $group->courseid]),
-            format_string($group->coursefullname)
-        );
 
         $typebadgeclass = ($group->recipient_type === 'sbuhead') ? 'badge-warning' : 'badge-info';
         $typehtml = html_writer::tag('span',
@@ -351,15 +338,20 @@ foreach ($groups as $group) {
             'pending'    => 'badge badge-secondary',
         ];
         $statushtml = html_writer::tag('span',
-            get_string('status_' . $groupstatus, 'local_mandatoryreminder'),
-            ['class' => ($statusbadgeclasses[$groupstatus] ?? 'badge badge-secondary') . ' group-status-badge',
+            get_string('status_' . $group->status, 'local_mandatoryreminder'),
+            ['class' => ($statusbadgeclasses[$group->status] ?? 'badge badge-secondary') . ' group-status-badge',
              'data-rep' => $group->representative_id]
         );
+        if ($group->status === 'failed' && !empty($group->error_message)) {
+            $statushtml .= ' ' . html_writer::tag('small',
+                html_writer::tag('abbr', '(?)',
+                    ['title' => s($group->error_message), 'class' => 'initialism text-muted']));
+        }
 
         $timesent = $group->timesent
             ? html_writer::tag('span', userdate($group->timesent, $datetimefmt),
                 ['class' => 'timesent-cell', 'data-rep' => $group->representative_id])
-            : html_writer::tag('span', get_string('never'),
+            : html_writer::tag('span', get_string('never', 'local_mandatoryreminder'),
                 ['class' => 'timesent-cell text-muted', 'data-rep' => $group->representative_id]);
 
         // Action buttons.
@@ -368,22 +360,19 @@ foreach ($groups as $group) {
             ['class' => 'btn btn-outline-secondary btn-sm mr-1 btn-preview',
              'data-id' => $group->representative_id]
         );
-        if ($groupstatus === 'pending') {
+        if ($group->status === 'pending') {
             $actions .= html_writer::tag('button',
                 get_string('send', 'local_mandatoryreminder'),
                 ['class' => 'btn btn-primary btn-sm btn-send',
-                 'data-id' => $group->representative_id,
-                 'data-count' => $group->pending_count]
+                 'data-id' => $group->representative_id]
             );
         }
 
         $row = [
             $checkbox,
             $recipienthtml,
-            $courselink,
             $typehtml,
-            $group->level,
-            html_writer::tag('span', $group->employee_count, ['class' => 'badge badge-light']),
+            html_writer::tag('span', $employeecount, ['class' => 'badge badge-light']),
             $statushtml,
             userdate($group->timecreated, $datetimefmt),
             $timesent,

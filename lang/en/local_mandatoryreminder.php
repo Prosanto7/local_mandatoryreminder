@@ -148,11 +148,44 @@ $string['level4_sbuhead_template_default'] = '<p>Dear SBU Head,</p>
 <p>This is a critical escalation. Please coordinate with the respective managers to ensure immediate course completion.</p>
 <p>Thank you,<br>{sitename}</p>';
 
+// Consolidated email templates.
+$string['consolidated_templates_heading'] = 'Consolidated Email Templates';
+$string['consolidated_templates_desc'] = 'These templates are used for consolidated emails where one user receives one email containing all their mandatory courses grouped by level (Level 4 first).';
+
+$string['consolidated_employee_template'] = 'Consolidated Email Template (Employee)';
+$string['consolidated_employee_template_desc'] = 'Consolidated email template for employees with multiple mandatory courses. Available placeholders: {fullname}, {firstname}, {lastname}, {course_table}, {sitename}. The {course_table} will be replaced with a table of all courses.';
+$string['consolidated_employee_template_default'] = '<p>Dear {fullname},</p>
+<p>This is a reminder about your mandatory courses that require attention. The following courses need to be completed:</p>
+{course_table}
+<p><strong>Important:</strong> Please prioritize courses marked as Level 4 (critical) and Level 3 (overdue).</p>
+<p>Thank you,<br>{sitename}</p>';
+
+$string['consolidated_supervisor_template'] = 'Consolidated Email Template (Supervisor)';
+$string['consolidated_supervisor_template_desc'] = 'Consolidated email template for supervisors. Available placeholders: {employee_table}, {sitename}. The {employee_table} will be replaced with employee course details.';
+$string['consolidated_supervisor_template_default'] = '<p>Dear Supervisor,</p>
+<p>The following employee under your supervision has incomplete mandatory courses that require your attention:</p>
+{employee_table}
+<p>Please follow up with this employee to ensure timely course completion.</p>
+<p>Thank you,<br>{sitename}</p>';
+
+$string['consolidated_sbuhead_template'] = 'Consolidated Email Template (SBU Head)';
+$string['consolidated_sbuhead_template_desc'] = 'Consolidated email template for SBU Heads. Available placeholders: {manager_table}, {sitename}. The {manager_table} will be replaced with managers and their employees.';
+$string['consolidated_sbuhead_template_default'] = '<p>Dear SBU Head,</p>
+<p>The following teams have employees with incomplete mandatory courses that require escalation:</p>
+{manager_table}
+<p>This is a critical escalation. Please coordinate with the respective supervisors to ensure immediate course completion.</p>
+<p>Thank you,<br>{sitename}</p>';
+
 // Email subjects.
 $string['email_subject_level1'] = 'Reminder: Mandatory Course Due Soon - {$a}';
 $string['email_subject_level2'] = 'URGENT: Mandatory Course Due Tomorrow - {$a}';
 $string['email_subject_level3'] = 'OVERDUE: Mandatory Course Not Completed - {$a}';
 $string['email_subject_level4'] = 'CRITICAL: Mandatory Course 2 Weeks Overdue - {$a}';
+
+// Consolidated email subjects.
+$string['email_subject_consolidated_employee'] = 'Mandatory Courses Reminder - {$a} Course(s) Require Attention';
+$string['email_subject_consolidated_supervisor'] = 'Team Member Mandatory Courses - Action Required';
+$string['email_subject_consolidated_sbuhead'] = 'CRITICAL: Team Mandatory Courses Escalation';
 
 // Notification strings.
 $string['messageprovider:coursereminder'] = 'Mandatory course reminder notifications';
@@ -168,6 +201,11 @@ $string['notification_small_level1'] = 'Course reminder: Due in 3 days';
 $string['notification_small_level2'] = 'URGENT: Course due tomorrow';
 $string['notification_small_level3'] = 'OVERDUE: Course not completed';
 $string['notification_small_level4'] = 'CRITICAL: Course 2 weeks overdue';
+
+// Consolidated notification strings.
+$string['notification_subject_consolidated'] = 'Mandatory courses reminder: {$a} course(s)';
+$string['notification_message_consolidated'] = 'You have {$a->count} mandatory course(s) requiring attention. Highest priority: Level {$a->level}. Please check your email for details.';
+$string['notification_small_consolidated'] = '{$a} mandatory course(s) need attention';
 
 // Dashboard filters.
 $string['allstatuses'] = 'All Statuses';
@@ -209,6 +247,8 @@ $string['select_all']         = 'Select all';
 $string['recipient']          = 'Recipient';
 $string['employees']          = 'Employees';
 $string['never']              = 'Never';
+$string['course_count']       = '# Courses';
+$string['highest_level']      = 'Highest Level';
 
 // Capability strings.
 $string['mandatoryreminder:sendemails'] = 'Send mandatory reminder emails';

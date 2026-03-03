@@ -33,25 +33,5 @@ defined('MOODLE_INTERNAL') || die();
 function xmldb_local_mandatoryreminder_upgrade($oldversion) {
     global $DB;
 
-    $dbman = $DB->get_manager();
-
-    if ($oldversion < 2026022701) {
-        $table = new xmldb_table('local_mandatoryreminder_queue');
-
-        // Add email_subject column.
-        $field = new xmldb_field('email_subject', XMLDB_TYPE_CHAR, '255', null, null, null, null, 'timesent');
-        if (!$dbman->field_exists($table, $field)) {
-            $dbman->add_field($table, $field);
-        }
-
-        // Add email_body column.
-        $field = new xmldb_field('email_body', XMLDB_TYPE_TEXT, null, null, null, null, null, 'email_subject');
-        if (!$dbman->field_exists($table, $field)) {
-            $dbman->add_field($table, $field);
-        }
-
-        upgrade_plugin_savepoint(true, 2026022701, 'local', 'mandatoryreminder');
-    }
-
     return true;
 }

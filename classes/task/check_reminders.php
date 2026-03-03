@@ -63,9 +63,10 @@ class check_reminders extends \core\task\scheduled_task {
         $coursecount = count($mandatorycourses);
         mtrace("Found {$coursecount} mandatory course(s)");
 
-        $totalqueued  = 0;
-        $totalskipped = 0;
+        // Build a structure: [userid][recipient_type] => array of course data.
+        $userreminders = [];
         $totalusers   = 0;
+        $processedusers = [];
 
         foreach ($mandatorycourses as $courseid) {
             $course          = get_course($courseid);
@@ -76,7 +77,6 @@ class check_reminders extends \core\task\scheduled_task {
 
             $incompleteusers = local_mandatoryreminder_get_incomplete_users($courseid);
             $usercount       = count($incompleteusers);
-            $totalusers     += $usercount;
 
             if ($usercount === 0) {
                 mtrace('  No incomplete users found — skipping');
@@ -85,85 +85,97 @@ class check_reminders extends \core\task\scheduled_task {
 
             mtrace("  Found {$usercount} incomplete user(s)");
 
-            $coursequeued  = 0;
-            $courseskipped = 0;
-
             foreach ($incompleteusers as $user) {
+                if (!isset($processedusers[$user->id])) {
+                    $processedusers[$user->id] = true;
+                    $totalusers++;
+                }
+
                 $enroldate    = $user->enroldate;
                 $deadlinedate = $enroldate + $deadlineseconds;
                 $daysdiff     = ($now - $deadlinedate) / (24 * 60 * 60);
                 $daysenrolled = ($now - $enroldate) / (24 * 60 * 60);
 
-                // Detailed date logging.
-                $enroldatestr    = userdate($enroldate, '%d %b %Y %H:%M');
-                $deadlinedatestr = userdate($deadlinedate, '%d %b %Y %H:%M');
-                $nowstr          = userdate($now, '%d %b %Y %H:%M');
-
-                mtrace('    User (' . fullname($user) . '):');
-                mtrace('      Enrolled: ' . $enroldatestr . ' (' . number_format($daysenrolled, 1) . ' days ago)');
-                mtrace('      Deadline: ' . $deadlinedatestr);
-                mtrace('      Now:      ' . $nowstr);
-                mtrace('      Days diff from deadline: ' . number_format($daysdiff, 1) .
-                    ($daysdiff < 0 ? ' (before deadline)' : ' (overdue)'));
-
-                // Check what levels have already been sent for this user/course.
-                $sentsummary = [];
-                for ($i = 1; $i <= 4; $i++) {
-                    if (local_mandatoryreminder_is_sent($user->id, $courseid, $i)) {
-                        $sentsummary[] = $i;
-                    }
-                }
-                if (!empty($sentsummary)) {
-                    mtrace('      Already sent levels: ' . implode(', ', $sentsummary));
-                } else {
-                    mtrace('      Already sent levels: none');
-                }
-
-                // Determine which level(s) to send.
+                // Determine which reminder levels should be sent.
                 $levels = $this->determine_reminder_levels($daysdiff, $deadline);
 
                 if (empty($levels)) {
-                    mtrace('      Status: Not in any reminder window — skipping');
-                    mtrace('');
-                    continue;
+                    continue; // Not in any reminder window.
                 }
-
-                mtrace('      Matched level(s): ' . implode(', ', $levels));
 
                 foreach ($levels as $level) {
-                    // Check if already sent.
+                    // Check if already sent for this user+course+level.
                     if (local_mandatoryreminder_is_sent($user->id, $courseid, $level)) {
-                        mtrace("        Level {$level}: already sent — skipping");
-                        $courseskipped++;
-                        $totalskipped++;
-                        continue;
+                        continue; // Already sent.
                     }
 
-                    // Queue the reminders.
-                    $queued        = $this->queue_reminders($user, $course, $level, $enroldate, $deadlinedate, $daysdiff);
-                    $coursequeued += $queued;
-                    $totalqueued  += $queued;
+                    // Store course data for this user+level.
+                    $coursedata = [
+                        'courseid' => $courseid,
+                        'coursename' => format_string($course->fullname),
+                        'level' => $level,
+                        'enroldate' => $enroldate,
+                        'deadlinedate' => $deadlinedate,
+                        'daysoverdue' => $daysdiff,
+                        'deadline_days' => $deadline
+                    ];
 
-                    mtrace("        Level {$level}: queued {$queued} email(s)");
+                    // Employee reminders.
+                    if (!isset($userreminders[$user->id]['employee'])) {
+                        $userreminders[$user->id]['employee'] = [
+                            'user' => $user,
+                            'courses' => []
+                        ];
+                    }
+                    $userreminders[$user->id]['employee']['courses'][] = $coursedata;
 
-                    // Log as sent to prevent duplicate sends on subsequent cron runs.
-                    local_mandatoryreminder_log_sent($user->id, $courseid, $level, $enroldate, $deadlinedate);
+                    // Level 3+ also notify supervisor.
+                    if ($level >= 3) {
+                        $supervisoremail = local_mandatoryreminder_get_user_custom_field($user->id, 'SupervisorEmail');
+                        if ($supervisoremail && validate_email($supervisoremail)) {
+                            $key = $supervisoremail;
+                            if (!isset($userreminders[$user->id]['supervisor'])) {
+                                $userreminders[$user->id]['supervisor'] = [];
+                            }
+                            if (!isset($userreminders[$user->id]['supervisor'][$key])) {
+                                $userreminders[$user->id]['supervisor'][$key] = [
+                                    'user' => $user,
+                                    'email' => $supervisoremail,
+                                    'courses' => []
+                                ];
+                            }
+                            $userreminders[$user->id]['supervisor'][$key]['courses'][] = $coursedata;
+                        }
+                    }
+
+                    // Level 4 also notify SBU head.
+                    if ($level == 4) {
+                        $sbuheademail = local_mandatoryreminder_get_user_custom_field($user->id, 'sbuheademail');
+                        if ($sbuheademail && validate_email($sbuheademail)) {
+                            $key = $sbuheademail;
+                            if (!isset($userreminders[$user->id]['sbuhead'])) {
+                                $userreminders[$user->id]['sbuhead'] = [];
+                            }
+                            if (!isset($userreminders[$user->id]['sbuhead'][$key])) {
+                                $userreminders[$user->id]['sbuhead'][$key] = [
+                                    'user' => $user,
+                                    'email' => $sbuheademail,
+                                    'courses' => []
+                                ];
+                            }
+                            $userreminders[$user->id]['sbuhead'][$key]['courses'][] = $coursedata;
+                        }
+                    }
                 }
-                mtrace('');
             }
-
-            mtrace("  Course done — queued: {$coursequeued}, skipped (already sent): {$courseskipped}");
         }
 
-        mtrace('Run summary: courses=' . $coursecount . ', users=' . $totalusers .
-            ', emails queued=' . $totalqueued . ', levels skipped=' . $totalskipped);
+        mtrace("Collected reminders for {$totalusers} user(s)");
 
-        if ($totalqueued > 0) {
-            mtrace("Emails queued for human review. Use the Student List or Management List pages to send them.");
-        } else {
-            mtrace('No new emails queued.');
-        }
+        // Now queue consolidated emails (one per user per recipient_type).
+        $totalqueued = $this->queue_consolidated_reminders($userreminders);
 
+        mtrace("Queued {$totalqueued} consolidated email(s)");
         mtrace('Mandatory course reminder check completed');
     }
 
@@ -207,89 +219,191 @@ class check_reminders extends \core\task\scheduled_task {
     }
 
     /**
-     * Queue reminder emails for a user
+     * Queue consolidated reminder emails (one email per user per recipient type).
      *
-     * @param stdClass $user User object
-     * @param stdClass $course Course object
-     * @param int $level Reminder level
-     * @param int $enroldate Enrolment date
-     * @param int $deadlinedate Deadline date
-     * @param float $daysdiff Days difference
+     * @param array $userreminders Structure: [userid][recipient_type] => data
      * @return int Number of emails queued
      */
-    private function queue_reminders($user, $course, $level, $enroldate, $deadlinedate, $daysdiff) {
+    private function queue_consolidated_reminders($userreminders) {
         global $DB;
 
         $now = time();
         $queued = 0;
 
-        // Always queue for employee.
-        $queue = new \stdClass();
-        $queue->userid = $user->id;
-        $queue->courseid = $course->id;
-        $queue->level = $level;
-        $queue->recipient_type = 'employee';
-        $queue->recipient_email = $user->email;
-        $queue->status = 'pending';
-        $queue->attempts = 0;
-        $queue->timecreated = $now;
-        $queue->timemodified = $now;
+        foreach ($userreminders as $userid => $types) {
+            // Queue employee email.
+            if (isset($types['employee']) && !empty($types['employee']['courses'])) {
+                $data = $types['employee'];
+                $user = $data['user'];
 
-        // Pre-render subject + body at queue time so preview and dispatch are instant.
-        $prerendered = \local_mandatoryreminder\email_sender::prerender_employee(
-            $user, $course, $level, $daysdiff
-        );
-        $queue->email_subject = $prerendered['subject'];
-        $queue->email_body    = $prerendered['body'];
+                // Sort courses by level (Level 4 first).
+                usort($data['courses'], function($a, $b) {
+                    return $b['level'] - $a['level'];
+                });
 
-        $DB->insert_record('local_mandatoryreminder_queue', $queue);
-        $queued++;
+                // Remove duplicates (same course might appear multiple times with different levels).
+                $uniquecourses = [];
+                $seencourses = [];
+                foreach ($data['courses'] as $coursedata) {
+                    $key = $coursedata['courseid'] . '_' . $coursedata['level'];
+                    if (!isset($seencourses[$key])) {
+                        $seencourses[$key] = true;
+                        $uniquecourses[] = $coursedata;
+                    }
+                }
 
-        // Level 3 and 4: Also send to supervisor.
-        if ($level >= 3) {
-            $supervisoremail = local_mandatoryreminder_get_user_custom_field($user->id, 'SupervisorEmail');
+                // Check if a queue item already exists for this user+recipient_type.
+                $existing = $DB->get_record('local_mandatoryreminder_queue', [
+                    'userid' => $userid,
+                    'recipient_type' => 'employee',
+                    'status' => 'pending'
+                ]);
 
-            if ($supervisoremail && validate_email($supervisoremail)) {
-                $queue = new \stdClass();
-                $queue->userid = $user->id;
-                $queue->courseid = $course->id;
-                $queue->level = $level;
-                $queue->recipient_type = 'supervisor';
-                $queue->recipient_email = $supervisoremail;
-                $queue->status = 'pending';
-                $queue->attempts = 0;
-                $queue->timecreated = $now;
-                $queue->timemodified = $now;
+                if ($existing) {
+                    // Update existing queue item with new courses data.
+                    $existing->courses_data = json_encode($uniquecourses);
+                    $existing->email_subject = null; // Will be regenerated.
+                    $existing->email_body = null; // Will be regenerated.
+                    $existing->timemodified = $now;
+                    $DB->update_record('local_mandatoryreminder_queue', $existing);
+                } else {
+                    // Create new queue item.
+                    $queue = new \stdClass();
+                    $queue->userid = $userid;
+                    $queue->courses_data = json_encode($uniquecourses);
+                    $queue->recipient_type = 'employee';
+                    $queue->recipient_email = $user->email;
+                    $queue->status = 'pending';
+                    $queue->attempts = 0;
+                    $queue->timecreated = $now;
+                    $queue->timemodified = $now;
+                    $DB->insert_record('local_mandatoryreminder_queue', $queue);
+                    $queued++;
+                }
 
-                $DB->insert_record('local_mandatoryreminder_queue', $queue);
-                $queued++;
-            } else {
-                mtrace('      [warn] User ' . $user->id . ': SupervisorEmail is missing or invalid' .
-                    " — supervisor not queued for level {$level}");
+                // Log each course+level as sent.
+                foreach ($uniquecourses as $coursedata) {
+                    local_mandatoryreminder_log_sent(
+                        $userid,
+                        $coursedata['courseid'],
+                        $coursedata['level'],
+                        $coursedata['enroldate'],
+                        $coursedata['deadlinedate']
+                    );
+                }
+
+                mtrace("  Queued employee email for user {$userid} (" . fullname($user) . ") with " . 
+                       count($uniquecourses) . " course(s)");
             }
-        }
 
-        // Level 4: Also send to SBU Head.
-        if ($level == 4) {
-            $sbuheademail = local_mandatoryreminder_get_user_custom_field($user->id, 'sbuheademail');
+            // Queue supervisor emails.
+            if (isset($types['supervisor'])) {
+                foreach ($types['supervisor'] as $supervisorkey => $data) {
+                    $user = $data['user'];
+                    $supervisoremail = $data['email'];
 
-            if ($sbuheademail && validate_email($sbuheademail)) {
-                $queue = new \stdClass();
-                $queue->userid = $user->id;
-                $queue->courseid = $course->id;
-                $queue->level = $level;
-                $queue->recipient_type = 'sbuhead';
-                $queue->recipient_email = $sbuheademail;
-                $queue->status = 'pending';
-                $queue->attempts = 0;
-                $queue->timecreated = $now;
-                $queue->timemodified = $now;
+                    // Sort courses by level (Level 4 first).
+                    usort($data['courses'], function($a, $b) {
+                        return $b['level'] - $a['level'];
+                    });
 
-                $DB->insert_record('local_mandatoryreminder_queue', $queue);
-                $queued++;
-            } else {
-                mtrace('      [warn] User ' . $user->id . ': sbuheademail is missing or invalid' .
-                    " — SBU head not queued for level {$level}");
+                    // Remove duplicates.
+                    $uniquecourses = [];
+                    $seencourses = [];
+                    foreach ($data['courses'] as $coursedata) {
+                        $key = $coursedata['courseid'] . '_' . $coursedata['level'];
+                        if (!isset($seencourses[$key])) {
+                            $seencourses[$key] = true;
+                            $uniquecourses[] = $coursedata;
+                        }
+                    }
+
+                    // Check if queue item exists.
+                    $existing = $DB->get_record('local_mandatoryreminder_queue', [
+                        'userid' => $userid,
+                        'recipient_type' => 'supervisor',
+                        'recipient_email' => $supervisoremail,
+                        'status' => 'pending'
+                    ]);
+
+                    if ($existing) {
+                        $existing->courses_data = json_encode($uniquecourses);
+                        $existing->email_subject = null;
+                        $existing->email_body = null;
+                        $existing->timemodified = $now;
+                        $DB->update_record('local_mandatoryreminder_queue', $existing);
+                    } else {
+                        $queue = new \stdClass();
+                        $queue->userid = $userid;
+                        $queue->courses_data = json_encode($uniquecourses);
+                        $queue->recipient_type = 'supervisor';
+                        $queue->recipient_email = $supervisoremail;
+                        $queue->status = 'pending';
+                        $queue->attempts = 0;
+                        $queue->timecreated = $now;
+                        $queue->timemodified = $now;
+                        $DB->insert_record('local_mandatoryreminder_queue', $queue);
+                        $queued++;
+                    }
+
+                    mtrace("  Queued supervisor email to {$supervisoremail} for user {$userid} with " . 
+                           count($uniquecourses) . " course(s)");
+                }
+            }
+
+            // Queue SBU head emails.
+            if (isset($types['sbuhead'])) {
+                foreach ($types['sbuhead'] as $sbuheadkey => $data) {
+                    $user = $data['user'];
+                    $sbuheademail = $data['email'];
+
+                    // Sort courses by level (Level 4 first).
+                    usort($data['courses'], function($a, $b) {
+                        return $b['level'] - $a['level'];
+                    });
+
+                    // Remove duplicates.
+                    $uniquecourses = [];
+                    $seencourses = [];
+                    foreach ($data['courses'] as $coursedata) {
+                        $key = $coursedata['courseid'] . '_' . $coursedata['level'];
+                        if (!isset($seencourses[$key])) {
+                            $seencourses[$key] = true;
+                            $uniquecourses[] = $coursedata;
+                        }
+                    }
+
+                    // Check if queue item exists.
+                    $existing = $DB->get_record('local_mandatoryreminder_queue', [
+                        'userid' => $userid,
+                        'recipient_type' => 'sbuhead',
+                        'recipient_email' => $sbuheademail,
+                        'status' => 'pending'
+                    ]);
+
+                    if ($existing) {
+                        $existing->courses_data = json_encode($uniquecourses);
+                        $existing->email_subject = null;
+                        $existing->email_body = null;
+                        $existing->timemodified = $now;
+                        $DB->update_record('local_mandatoryreminder_queue', $existing);
+                    } else {
+                        $queue = new \stdClass();
+                        $queue->userid = $userid;
+                        $queue->courses_data = json_encode($uniquecourses);
+                        $queue->recipient_type = 'sbuhead';
+                        $queue->recipient_email = $sbuheademail;
+                        $queue->status = 'pending';
+                        $queue->attempts = 0;
+                        $queue->timecreated = $now;
+                        $queue->timemodified = $now;
+                        $DB->insert_record('local_mandatoryreminder_queue', $queue);
+                        $queued++;
+                    }
+
+                    mtrace("  Queued SBU head email to {$sbuheademail} for user {$userid} with " . 
+                           count($uniquecourses) . " course(s)");
+                }
             }
         }
 
