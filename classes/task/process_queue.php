@@ -123,8 +123,11 @@ class process_queue extends \core\task\adhoc_task {
             $item->timemodified = time();
             $DB->update_record('local_mandatoryreminder_queue', $item);
 
-            mtrace("  Item ID {$item->id}: user={$item->userid}, course={$item->courseid}," .
-                " level={$item->level}, type={$item->recipient_type}, to={$item->recipient_email}");
+            // For consolidated emails, show course count from JSON.
+            $coursesdata = !empty($item->courses_data) ? json_decode($item->courses_data, true) : [];
+            $coursecount = count($coursesdata);
+            mtrace("  Item ID {$item->id}: user={$item->userid}, courses={$coursecount}," .
+                " type={$item->recipient_type}, to={$item->recipient_email}");
 
             try {
                 $success = email_sender::send_item($item);

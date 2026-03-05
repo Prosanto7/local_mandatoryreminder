@@ -256,13 +256,13 @@ class email_sender {
     public static function send_item(\stdClass $item): bool {
         global $DB;
 
-        $user   = $DB->get_record('user', ['id' => $item->userid]);
-        $course = get_course($item->courseid);
+        $user = $DB->get_record('user', ['id' => $item->userid]);
 
-        if (!$user || !$course) {
+        if (!$user) {
             return false;
         }
 
+        // Get preview which handles consolidated courses_data JSON.
         $preview = self::get_preview($item);
         $subject = $preview['subject'];
         $body    = $preview['body'];
